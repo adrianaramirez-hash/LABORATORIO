@@ -80,6 +80,7 @@ def _load_from_gsheets(sheet_id: str):
     ws_cat = sh.worksheet(resolved["Catalogo_Servicio"])
 
     def make_unique_headers(raw_headers):
+        # Evita crash por duplicados tipo "¿Por qué?"
         seen_base = {}
         used_final = set()
         out = []
@@ -163,6 +164,48 @@ def _mean_numeric(series: pd.Series):
     return pd.to_numeric(series, errors="coerce").mean()
 
 
+def _chart_likert_by_question(df_q: pd.DataFrame):
+    # df_q columns: Pregunta, Promedio
+    if df_q.empty:
+        return None
+    base = df_q.copy()
+    base["Promedio"] = pd.to_numeric(base["Promedio"], errors="coerce")
+    base = base.dropna(subset=["Promedio"])
+    if base.empty:
+        return None
+
+    return (
+        alt.Chart(base)
+        .mark_bar()
+        .encode(
+            x=alt.X("Promedio:Q", scale=alt.Scale(domain=[1, 5])),
+            y=alt.Y("Pregunta:N", sort="-x"),
+            tooltip=[alt.Tooltip("Promedio:Q", format=".2f"), "Pregunta:N"],
+        )
+    )
+
+
+def _chart_yesno_by_question(df_q: pd.DataFrame):
+    # df_q columns: Pregunta, % Sí
+    if df_q.empty:
+        return None
+    base = df_q.copy()
+    base["% Sí"] = pd.to_numeric(base["% Sí"], errors="coerce")
+    base = base.dropna(subset=["% Sí"])
+    if base.empty:
+        return None
+
+    return (
+        alt.Chart(base)
+        .mark_bar()
+        .encode(
+            x=alt.X("% Sí:Q", scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y("Pregunta:N", sort="-x"),
+            tooltip=[alt.Tooltip("% Sí:Q", format=".1f"), "Pregunta:N"],
+        )
+    )
+
+
 def render_encuesta_calidad(vista: str, carrera: str | None):
     st.subheader("Encuesta de calidad")
 
@@ -206,7 +249,6 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
         else:
             servicio_sel = "(Todos)"
 
-        # Carrera: solo en Dirección General (drill-down). En Director de carrera se aplica automático.
         if vista == "Dirección General" and "Carrera_Catalogo" in df.columns:
             carreras = ["(Todas)"] + sorted(df["Carrera_Catalogo"].dropna().unique().tolist())
             carrera_sel = st.selectbox("Carrera", carreras, index=0)
@@ -225,11 +267,9 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
     if servicio_sel != "(Todos)" and "Servicio" in f.columns:
         f = f[f["Servicio"] == servicio_sel]
 
-    # Carrera automática (sin avisos visibles)
     if vista == "Director de carrera" and carrera and "Carrera_Catalogo" in f.columns:
         f = f[f["Carrera_Catalogo"] == carrera]
 
-    # Carrera opcional en Dirección General
     if vista == "Dirección General" and carrera_sel != "(Todas)" and "Carrera_Catalogo" in f.columns:
         f = f[f["Carrera_Catalogo"] == carrera_sel]
 
@@ -287,21 +327,20 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
         )
 
     # ---------------------------
-    # Por sección (desglose: promedio de sección + preguntas y promedios)
+    # Por sección (PROMEDIO + barras por pregunta dentro de cada sección)
     # ---------------------------
     with tab2:
-        st.markdown("### Desglose por sección")
+        st.markdown("### Desglose por sección (comparativo de preguntas)")
 
-        # Reusa sec_df si existe (se calcula en tab1); si no, lo recalculamos aquí por seguridad.
-        if "sec_df" not in locals() or sec_df.empty:
-            rows = []
-            for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
-                cols = [c for c in g["header_num"].tolist() if c in f.columns and c in likert_cols]
-                if not cols:
-                    continue
-                val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
-                rows.append({"Sección": sec_name, "Promedio": val, "Preguntas": len(cols), "sec_code": sec_code})
-            sec_df = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
+        # recalcular sec_df por seguridad (aunque exista)
+        rows = []
+        for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
+            cols = [c for c in g["header_num"].tolist() if c in f.columns and c in likert_cols]
+            if not cols:
+                continue
+            val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
+            rows.append({"Sección": sec_name, "Promedio": val, "Preguntas": len(cols), "sec_code": sec_code})
+        sec_df = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
 
         for _, r in sec_df.iterrows():
             sec_code = r["sec_code"]
@@ -309,8 +348,8 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
             sec_avg = r["Promedio"]
 
             with st.expander(f"{sec_name} — Promedio: {sec_avg:.2f}", expanded=False):
-                # Preguntas de la sección (incluye Likert y Sí/No)
                 mm = mapa_ok[mapa_ok["section_code"] == sec_code].copy()
+
                 qrows = []
                 for _, m in mm.iterrows():
                     col = m["header_num"]
@@ -334,23 +373,31 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
                     st.info("Sin datos para esta sección con los filtros actuales.")
                     continue
 
-                # Orden: Likert por Promedio, Sí/No por %Sí
-                qdf_l = qdf[qdf["Tipo"] == "Likert"].sort_values("Promedio", ascending=False)
-                qdf_y = qdf[qdf["Tipo"] == "Sí/No"].sort_values("% Sí", ascending=False)
-
+                # Likert: tabla + gráfica (barras por pregunta)
+                qdf_l = qdf[qdf["Tipo"] == "Likert"].copy()
                 if not qdf_l.empty:
+                    qdf_l = qdf_l.sort_values("Promedio", ascending=False)
                     st.markdown("**Preguntas Likert (1–5)**")
-                    st.dataframe(
-                        qdf_l[["Pregunta", "Promedio"]].reset_index(drop=True),
-                        use_container_width=True,
-                    )
 
+                    show_l = qdf_l[["Pregunta", "Promedio"]].reset_index(drop=True)
+                    st.dataframe(show_l, use_container_width=True)
+
+                    chart_l = _chart_likert_by_question(show_l)
+                    if chart_l is not None:
+                        st.altair_chart(chart_l, use_container_width=True)
+
+                # Sí/No: tabla + gráfica (barras por pregunta)
+                qdf_y = qdf[qdf["Tipo"] == "Sí/No"].copy()
                 if not qdf_y.empty:
+                    qdf_y = qdf_y.sort_values("% Sí", ascending=False)
                     st.markdown("**Preguntas Sí/No**")
-                    st.dataframe(
-                        qdf_y[["Pregunta", "% Sí"]].reset_index(drop=True),
-                        use_container_width=True,
-                    )
+
+                    show_y = qdf_y[["Pregunta", "% Sí"]].reset_index(drop=True)
+                    st.dataframe(show_y, use_container_width=True)
+
+                    chart_y = _chart_yesno_by_question(show_y)
+                    if chart_y is not None:
+                        st.altair_chart(chart_y, use_container_width=True)
 
     # ---------------------------
     # Comentarios
@@ -362,10 +409,7 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
             c
             for c in f.columns
             if (not c.endswith("_num"))
-            and any(
-                k in c.lower()
-                for k in ["¿por qué", "comentario", "sugerencia", "escríbelo", "escribelo"]
-            )
+            and any(k in c.lower() for k in ["¿por qué", "comentario", "sugerencia", "escríbelo", "escribelo"])
         ]
 
         if not open_cols:
