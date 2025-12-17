@@ -18,10 +18,10 @@ with col2:
 
 st.divider()
 
-# Selector de vista
+# Selector de vista (AJUSTE: solo quedan 2 vistas)
 vista = st.selectbox(
     "Selecciona la vista:",
-    ["Dirección General", "Dirección Académica", "Director de carrera"]
+    ["Dirección General", "Director de carrera"]
 )
 
 carrera = None
