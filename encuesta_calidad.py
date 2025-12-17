@@ -28,6 +28,10 @@ YESNO_COLS = {
     "UDL_ViasComunicacion_num",
 }
 
+# Umbrales de auto-layout
+MAX_VERTICAL_QUESTIONS = 7   # <= 7 vertical, >= 8 horizontal
+MAX_VERTICAL_SECTIONS = 7    # <= 7 vertical, >= 8 horizontal
+
 
 def _section_from_numcol(col: str) -> str:
     return col.split("_", 1)[0] if "_" in col else "OTROS"
@@ -42,22 +46,16 @@ def _to_datetime_safe(s):
 
 
 def _wrap_text(s: str, width: int = 18, max_lines: int = 3) -> str:
-    """
-    Devuelve texto con saltos de línea (2-3 renglones) para etiquetas del eje X.
-    Si excede max_lines, recorta y agrega '…'.
-    """
     if s is None or (isinstance(s, float) and pd.isna(s)):
         return ""
     s = str(s).strip()
     if not s:
         return ""
-
     lines = textwrap.wrap(s, width=width)
     if len(lines) <= max_lines:
         return "\n".join(lines)
-
-    # Recorte a max_lines con ellipsis
-    kept = lines[: max_lines]
+    kept = lines[:max_lines]
+    # ellipsis
     if len(kept[-1]) >= 1:
         kept[-1] = kept[-1][:-1] + "…"
     else:
@@ -105,7 +103,6 @@ def _load_from_gsheets(sheet_id: str):
     ws_cat = sh.worksheet(resolved["Catalogo_Servicio"])
 
     def make_unique_headers(raw_headers):
-        # Evita crash por duplicados tipo "¿Por qué?"
         seen_base = {}
         used_final = set()
         out = []
@@ -143,8 +140,7 @@ def _load_from_gsheets(sheet_id: str):
             return pd.DataFrame()
         headers = make_unique_headers(values[0])
         rows = values[1:]
-        df_local = pd.DataFrame(rows, columns=headers).replace("", pd.NA)
-        return df_local
+        return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
 
     df = ws_to_df(ws_resp)
     mapa = ws_to_df(ws_map)
@@ -189,80 +185,82 @@ def _mean_numeric(series: pd.Series):
     return pd.to_numeric(series, errors="coerce").mean()
 
 
-def _chart_sections_vertical(sec_df: pd.DataFrame):
-    base = sec_df.copy()
-    base["Sección_wrapped"] = base["Sección"].apply(lambda x: _wrap_text(x, width=16, max_lines=3))
+def _bar_chart_auto(
+    df_in: pd.DataFrame,
+    category_col: str,
+    value_col: str,
+    value_domain: list,
+    value_title: str,
+    tooltip_cols: list,
+    max_vertical: int,
+    wrap_width_vertical: int = 18,
+    wrap_width_horizontal: int = 30,
+    height_per_row: int = 28,
+    base_height: int = 260,
+):
+    """
+    Gráfica de barras automática:
+    - Vertical si n_categorías <= max_vertical
+    - Horizontal si n_categorías > max_vertical
+    """
+    if df_in.empty:
+        return None
 
-    return (
-        alt.Chart(base)
+    df = df_in.copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col])
+
+    if df.empty:
+        return None
+
+    n = len(df)
+
+    # Wrap labels
+    if n <= max_vertical:
+        df["_cat_wrapped"] = df[category_col].apply(lambda x: _wrap_text(x, width=wrap_width_vertical, max_lines=3))
+        chart = (
+            alt.Chart(df)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "_cat_wrapped:N",
+                    sort=alt.SortField(field=value_col, order="descending"),
+                    axis=alt.Axis(title=None, labelAngle=0, labelLimit=0),
+                ),
+                y=alt.Y(
+                    f"{value_col}:Q",
+                    scale=alt.Scale(domain=value_domain),
+                    axis=alt.Axis(title=value_title),
+                ),
+                tooltip=tooltip_cols,
+            )
+            .properties(height=max(320, base_height))
+        )
+        return chart
+
+    # Horizontal (mejor para muchas categorías)
+    df["_cat_wrapped"] = df[category_col].apply(lambda x: _wrap_text(x, width=wrap_width_horizontal, max_lines=3))
+    dynamic_height = max(base_height, n * height_per_row)
+
+    chart = (
+        alt.Chart(df)
         .mark_bar()
         .encode(
-            x=alt.X(
-                "Sección_wrapped:N",
-                sort=alt.SortField(field="Promedio", order="descending"),
-                axis=alt.Axis(title=None, labelAngle=0, labelLimit=0),
+            y=alt.Y(
+                "_cat_wrapped:N",
+                sort=alt.SortField(field=value_col, order="descending"),
+                axis=alt.Axis(title=None, labelLimit=0),
             ),
-            y=alt.Y("Promedio:Q", axis=alt.Axis(title="Promedio"), scale=alt.Scale(domain=[1, 5])),
-            tooltip=["Sección", alt.Tooltip("Promedio:Q", format=".2f"), "Preguntas"],
-        )
-        .properties(height=320)
-    )
-
-
-def _chart_likert_by_question_vertical(df_q: pd.DataFrame):
-    # df_q columns: Pregunta, Promedio
-    if df_q.empty:
-        return None
-    base = df_q.copy()
-    base["Promedio"] = pd.to_numeric(base["Promedio"], errors="coerce")
-    base = base.dropna(subset=["Promedio"])
-    if base.empty:
-        return None
-
-    base["Pregunta_wrapped"] = base["Pregunta"].apply(lambda x: _wrap_text(x, width=18, max_lines=3))
-
-    return (
-        alt.Chart(base)
-        .mark_bar()
-        .encode(
             x=alt.X(
-                "Pregunta_wrapped:N",
-                sort=alt.SortField(field="Promedio", order="descending"),
-                axis=alt.Axis(title=None, labelAngle=0, labelLimit=0),
+                f"{value_col}:Q",
+                scale=alt.Scale(domain=value_domain),
+                axis=alt.Axis(title=value_title),
             ),
-            y=alt.Y("Promedio:Q", axis=alt.Axis(title="Promedio"), scale=alt.Scale(domain=[1, 5])),
-            tooltip=[alt.Tooltip("Promedio:Q", format=".2f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
+            tooltip=tooltip_cols,
         )
-        .properties(height=340)
+        .properties(height=dynamic_height)
     )
-
-
-def _chart_yesno_by_question_vertical(df_q: pd.DataFrame):
-    # df_q columns: Pregunta, % Sí
-    if df_q.empty:
-        return None
-    base = df_q.copy()
-    base["% Sí"] = pd.to_numeric(base["% Sí"], errors="coerce")
-    base = base.dropna(subset=["% Sí"])
-    if base.empty:
-        return None
-
-    base["Pregunta_wrapped"] = base["Pregunta"].apply(lambda x: _wrap_text(x, width=18, max_lines=3))
-
-    return (
-        alt.Chart(base)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "Pregunta_wrapped:N",
-                sort=alt.SortField(field="% Sí", order="descending"),
-                axis=alt.Axis(title=None, labelAngle=0, labelLimit=0),
-            ),
-            y=alt.Y("% Sí:Q", axis=alt.Axis(title="% Sí"), scale=alt.Scale(domain=[0, 100])),
-            tooltip=[alt.Tooltip("% Sí:Q", format=".1f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
-        )
-        .properties(height=340)
-    )
+    return chart
 
 
 def render_encuesta_calidad(vista: str, carrera: str | None):
@@ -297,7 +295,7 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
     yesno_cols = [c for c in num_cols if _is_yesno_col(c)]
 
     # ---------------------------
-    # Filtros (limpios: sin Programa; Carrera solo en Dirección General)
+    # Filtros
     # ---------------------------
     with st.sidebar:
         st.markdown("### Filtros – Encuesta de calidad")
@@ -340,7 +338,7 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
     tab1, tab2, tab3 = st.tabs(["Resumen", "Por sección", "Comentarios"])
 
     # ---------------------------
-    # Resumen (global + promedios por sección)
+    # Resumen
     # ---------------------------
     with tab1:
         c1, c2, c3 = st.columns(3)
@@ -376,18 +374,28 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
 
         st.dataframe(sec_df.drop(columns=["sec_code"]), use_container_width=True)
 
-        st.altair_chart(
-            _chart_sections_vertical(sec_df),
-            use_container_width=True,
+        sec_chart = _bar_chart_auto(
+            df_in=sec_df,
+            category_col="Sección",
+            value_col="Promedio",
+            value_domain=[1, 5],
+            value_title="Promedio",
+            tooltip_cols=["Sección", alt.Tooltip("Promedio:Q", format=".2f"), "Preguntas"],
+            max_vertical=MAX_VERTICAL_SECTIONS,
+            wrap_width_vertical=16,
+            wrap_width_horizontal=28,
+            base_height=300,
         )
+        if sec_chart is not None:
+            st.altair_chart(sec_chart, use_container_width=True)
 
     # ---------------------------
-    # Por sección (PROMEDIO + barras por pregunta dentro de cada sección)
+    # Por sección
     # ---------------------------
     with tab2:
         st.markdown("### Desglose por sección (comparativo de preguntas)")
 
-        # Recalcular sec_df
+        # Recalcular sec_df para iterar
         rows = []
         for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
             cols = [c for c in g["header_num"].tolist() if c in f.columns and c in likert_cols]
@@ -395,9 +403,9 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
                 continue
             val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
             rows.append({"Sección": sec_name, "Promedio": val, "Preguntas": len(cols), "sec_code": sec_code})
-        sec_df = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
+        sec_df2 = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
 
-        for _, r in sec_df.iterrows():
+        for _, r in sec_df2.iterrows():
             sec_code = r["sec_code"]
             sec_name = r["Sección"]
             sec_avg = r["Promedio"]
@@ -437,7 +445,18 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
                     show_l = qdf_l[["Pregunta", "Promedio"]].reset_index(drop=True)
                     st.dataframe(show_l, use_container_width=True)
 
-                    chart_l = _chart_likert_by_question_vertical(show_l)
+                    chart_l = _bar_chart_auto(
+                        df_in=show_l,
+                        category_col="Pregunta",
+                        value_col="Promedio",
+                        value_domain=[1, 5],
+                        value_title="Promedio",
+                        tooltip_cols=[alt.Tooltip("Promedio:Q", format=".2f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
+                        max_vertical=MAX_VERTICAL_QUESTIONS,
+                        wrap_width_vertical=18,
+                        wrap_width_horizontal=34,
+                        base_height=320,
+                    )
                     if chart_l is not None:
                         st.altair_chart(chart_l, use_container_width=True)
 
@@ -450,7 +469,18 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
                     show_y = qdf_y[["Pregunta", "% Sí"]].reset_index(drop=True)
                     st.dataframe(show_y, use_container_width=True)
 
-                    chart_y = _chart_yesno_by_question_vertical(show_y)
+                    chart_y = _bar_chart_auto(
+                        df_in=show_y,
+                        category_col="Pregunta",
+                        value_col="% Sí",
+                        value_domain=[0, 100],
+                        value_title="% Sí",
+                        tooltip_cols=[alt.Tooltip("% Sí:Q", format=".1f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
+                        max_vertical=MAX_VERTICAL_QUESTIONS,
+                        wrap_width_vertical=18,
+                        wrap_width_horizontal=34,
+                        base_height=320,
+                    )
                     if chart_y is not None:
                         st.altair_chart(chart_y, use_container_width=True)
 
