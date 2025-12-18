@@ -44,19 +44,6 @@ def _get_gspread_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
-def _open_sheet_by_modalidad(modalidad: str) -> gspread.Spreadsheet:
-    key = URL_KEYS.get(modalidad)
-    if not key:
-        raise ValueError(f"Modalidad no reconocida: {modalidad}")
-
-    url = st.secrets.get(key, "").strip()
-    if not url:
-        raise KeyError(f"Falta configurar {key} en Secrets.")
-
-    client = _get_gspread_client()
-    return client.open_by_url(url)
-
-
 @st.cache_data(ttl=300)
 def _read_ws_df_by_url(url: str, worksheet_name: str) -> pd.DataFrame:
     """
@@ -81,15 +68,29 @@ def _get_url_for_modalidad(modalidad: str) -> str:
 # Utilidades de filtrado
 # ----------------------------
 def _pick_fecha_col(df: pd.DataFrame) -> str | None:
+    """
+    Preferimos 'Anio' si existe (tu PROCESADO ya lo trae).
+    Si no existe, usamos fecha/timestamp.
+    """
+    for c in ["Anio", "Año", "anio", "year", "Year"]:
+        if c in df.columns:
+            return c
+
     for c in ["Marca temporal", "Marca Temporal", "Fecha", "fecha", "timestamp", "Timestamp"]:
         if c in df.columns:
             return c
+
     return None
 
 
 def _pick_servicio_col(df: pd.DataFrame) -> str | None:
-    # Prioridades típicas en tus datos
-    for c in ["Servicio", "Indica el servicio", "Carrera_Catalogo", "Carrera", "Programa"]:
+    """
+    Prioridad según tu estructura real:
+    - Carrera_Catalogo (ideal para directores)
+    - Servicio (si existe)
+    - Servicio de procedencia (si existe)
+    """
+    for c in ["Carrera_Catalogo", "Servicio", "Servicio de procedencia", "Indica el servicio", "Carrera", "Programa"]:
         if c in df.columns:
             return c
     return None
@@ -118,7 +119,7 @@ def _resolver_modalidad_auto(vista: str, carrera: str | None) -> str:
     return "Escolarizado / Ejecutivas"
 
 
-def _year_options(df: pd.DataFrame, fecha_col: str) -> list[int]:
+def _year_options_from_datetime(df: pd.DataFrame, fecha_col: str) -> list[int]:
     d = df.copy()
     d[fecha_col] = pd.to_datetime(d[fecha_col], errors="coerce", dayfirst=True)
     years = sorted([int(y) for y in d[fecha_col].dropna().dt.year.unique().tolist()])
@@ -154,30 +155,48 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
     # 3) Año (filtro anual)
     fecha_col = _pick_fecha_col(df)
     if not fecha_col:
-        st.warning("No encontré columna de fecha (Marca temporal/Fecha) en PROCESADO. No puedo filtrar por año.")
-        # Aun así mostramos preview básico
+        st.warning("No encontré columna de año/fecha en PROCESADO. No puedo filtrar por año.")
         st.dataframe(df.head(30), use_container_width=True)
         st.stop()
 
-    years = _year_options(df, fecha_col)
-    if not years:
-        st.warning("No pude detectar años válidos en la columna de fecha.")
-        st.dataframe(df.head(30), use_container_width=True)
-        st.stop()
+    # Si fecha_col es Anio, filtramos directo por número
+    if fecha_col in ["Anio", "Año", "anio", "year", "Year"]:
+        dff = df.copy()
+        dff[fecha_col] = pd.to_numeric(dff[fecha_col], errors="coerce")
 
-    year_sel = st.selectbox("Año", years, index=len(years) - 1)
+        years = sorted([int(y) for y in dff[fecha_col].dropna().unique().tolist()])
+        if not years:
+            st.warning("No pude detectar años válidos en la columna Anio.")
+            st.dataframe(df.head(30), use_container_width=True)
+            st.stop()
 
-    dff = df.copy()
-    dff[fecha_col] = pd.to_datetime(dff[fecha_col], errors="coerce", dayfirst=True)
-    dff = dff[dff[fecha_col].dt.year == year_sel]
+        year_sel = st.selectbox("Año", years, index=len(years) - 1)
+        dff = dff[dff[fecha_col] == year_sel]
+
+        fecha_real_para_rango = None  # no mostramos rango de fechas si solo es Anio
+    else:
+        years = _year_options_from_datetime(df, fecha_col)
+        if not years:
+            st.warning("No pude detectar años válidos en la columna de fecha.")
+            st.dataframe(df.head(30), use_container_width=True)
+            st.stop()
+
+        year_sel = st.selectbox("Año", years, index=len(years) - 1)
+
+        dff = df.copy()
+        dff[fecha_col] = pd.to_datetime(dff[fecha_col], errors="coerce", dayfirst=True)
+        dff = dff[dff[fecha_col].dt.year == year_sel]
+
+        fecha_real_para_rango = fecha_col
 
     # 4) Servicio/Carrera (solo Dirección General, y solo si existe columna)
     serv_col = _pick_servicio_col(dff)
 
     if vista == "Director de carrera":
-        # filtro fijo a carrera si hay columna de servicio
+        # filtro fijo a carrera si hay columna de servicio/carrera
         if serv_col and carrera:
-            # igualamos por texto exacto; si te conviene normalizar, lo hacemos después
+            # aquí puedes elegir filtrar por Carrera_Catalogo (recomendado)
+            # o por coincidencia exacta con "carrera" del selector
             dff = dff[dff[serv_col].astype(str) == str(carrera)]
             st.caption(f"Filtro fijo: **{serv_col} = {carrera}**")
     else:
@@ -191,7 +210,7 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
         else:
             st.info("No se encontró columna Servicio/Carrera en PROCESADO para habilitar ese filtro.")
 
-    # 5) Smoke test + KPIs base (para confirmar que ya está bien conectado)
+    # 5) Smoke test + KPIs base
     if dff.empty:
         st.warning("No hay registros con los filtros seleccionados.")
         st.stop()
@@ -202,11 +221,12 @@ def render_encuesta_calidad(vista: str, carrera: str | None):
     st.write(f"- Año: **{year_sel}**")
     st.write(f"- Registros: **{len(dff)}**")
 
-    # Rango de fechas dentro del año
-    fmin = dff[fecha_col].min()
-    fmax = dff[fecha_col].max()
-    if pd.notna(fmin) and pd.notna(fmax):
-        st.caption(f"Rango de fechas: {fmin.date()} a {fmax.date()}")
+    # Rango de fechas solo si hay columna de fecha real
+    if fecha_real_para_rango:
+        fmin = dff[fecha_real_para_rango].min()
+        fmax = dff[fecha_real_para_rango].max()
+        if pd.notna(fmin) and pd.notna(fmax):
+            st.caption(f"Rango de fechas: {fmin.date()} a {fmax.date()}")
 
     # Identificar columnas numéricas (_num) para KPIs
     num_cols = [c for c in dff.columns if str(c).endswith("_num")]
