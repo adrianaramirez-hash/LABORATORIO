@@ -2,24 +2,13 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 import gspread
-import json
 import textwrap
-from google.oauth2.service_account import Credentials
-
+import json
 
 # =========================
 # CONFIG
 # =========================
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
-
-MODALIDADES = [
-    "Virtual / Mixto",
-    "Escolarizado / Ejecutivas",
-    "Preparatoria",
-]
+MODALIDADES = ["Virtual / Mixto", "Escolarizado / Ejecutivas", "Preparatoria"]
 
 URL_KEYS = {
     "Virtual / Mixto": "EC_VIRTUAL_URL",
@@ -27,12 +16,15 @@ URL_KEYS = {
     "Preparatoria": "EC_PREPA_URL",
 }
 
-SHEET_PROCESADO = "PROCESADO"
-SHEET_RESPUESTAS_FALLBACK = "Respuestas"
+SHEET_RESPUESTAS = "Respuestas"
 SHEET_MAPA = "Mapa_Preguntas"
 SHEET_CATALOGO = "Catalogo_Servicio"
 
-# Etiquetas de secciones (si tus códigos coinciden con los prefijos _num)
+KEY_BY_MODALIDAD = {
+    "Virtual / Mixto": "Selecciona el programa académico que estudias",
+    "Escolarizado / Ejecutivas": "Servicio de procedencia",
+}
+
 SECTION_LABELS = {
     "DIR": "Director/Coordinador",
     "SER": "Servicios",
@@ -40,22 +32,6 @@ SECTION_LABELS = {
     "INS": "Instalaciones y equipo tecnológico",
     "AMB": "Ambiente escolar",
     "REC": "Recomendación",
-    "APR": "Aprendizaje",
-    "MAT": "Materiales en la plataforma",
-    "EVA": "Evaluación del conocimiento",
-    "SEAC": "Soporte académico / SEAC",
-    "ADM": "Acceso a soporte administrativo",
-    "COM": "Comunicación con compañeros",
-    "PLAT": "Plataforma SEAC",
-    "UDL": "Comunicación con la universidad",
-}
-
-# Sí/No (si las tienes) en 0/1
-YESNO_COLS = {
-    "ADM_ContactoExiste_num",
-    "REC_Volveria_num",
-    "REC_Recomendaria_num",
-    "UDL_ViasComunicacion_num",
 }
 
 MAX_VERTICAL_QUESTIONS = 7
@@ -63,25 +39,41 @@ MAX_VERTICAL_SECTIONS = 7
 
 
 # =========================
-# HELPERS
+# AUTH (compatible con gcp_service_account y gcp_service_account_json)
 # =========================
-def _normalize(s: object) -> str:
-    return str(s).strip().lower() if pd.notna(s) else ""
+def _get_service_account_dict():
+    """
+    Soporta:
+    - [gcp_service_account] (tabla)
+    - [gcp_service_account_json] (tabla)
+    - gcp_service_account_json = "{...}" (string JSON)
+    """
+    if "gcp_service_account" in st.secrets:
+        return dict(st.secrets["gcp_service_account"])
+
+    val = st.secrets.get("gcp_service_account_json", None)
+    if val is None:
+        raise KeyError('Falta secret: "gcp_service_account" o "gcp_service_account_json".')
+
+    if isinstance(val, str):
+        return json.loads(val)
+
+    return dict(val)
 
 
-def _section_from_numcol(col: str) -> str:
-    return col.split("_", 1)[0] if "_" in col else "OTROS"
+def _get_gspread_client():
+    sa = _get_service_account_dict()
+    return gspread.service_account_from_dict(sa)
 
 
-def _is_yesno_col(col: str) -> bool:
-    return col in YESNO_COLS
-
-
+# =========================
+# Helpers
+# =========================
 def _to_datetime_safe(s):
     return pd.to_datetime(s, errors="coerce", dayfirst=True)
 
 
-def _wrap_text(s: str, width: int = 18, max_lines: int = 3) -> str:
+def _wrap_text(s, width=18, max_lines=3):
     if s is None or (isinstance(s, float) and pd.isna(s)):
         return ""
     s = str(s).strip()
@@ -95,23 +87,101 @@ def _wrap_text(s: str, width: int = 18, max_lines: int = 3) -> str:
     return "\n".join(kept)
 
 
-def _mean_numeric(series: pd.Series):
+def _section_from_numcol(col):
+    return col.split("_", 1)[0] if "_" in col else "OTROS"
+
+
+def _normalize(s):
+    return str(s).strip().lower() if pd.notna(s) else ""
+
+
+def _normalize_series(s):
+    return s.astype(str).map(lambda x: str(x).strip().lower())
+
+
+def _make_unique_headers(raw_headers):
+    seen = {}
+    out = []
+    for h in raw_headers:
+        base = (h or "").strip()
+        if base == "":
+            base = "SIN_TITULO"
+        seen[base] = seen.get(base, 0) + 1
+        out.append(base if seen[base] == 1 else f"{base} ({seen[base]})")
+    return out
+
+
+def _ws_to_df(ws):
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame()
+    headers = _make_unique_headers(values[0])
+    rows = values[1:]
+    return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _load_from_gsheets_by_url(url):
+    gc = _get_gspread_client()
+    sh = gc.open_by_url(url)
+
+    ws_resp = sh.worksheet(SHEET_RESPUESTAS)
+    ws_map = sh.worksheet(SHEET_MAPA)
+    ws_cat = sh.worksheet(SHEET_CATALOGO)
+
+    df = _ws_to_df(ws_resp)
+    mapa = _ws_to_df(ws_map)
+    catalogo = _ws_to_df(ws_cat)
+    return df, mapa, catalogo
+
+
+def _merge_catalogo(df, catalogo, key_col_df):
+    if df.empty or catalogo.empty:
+        return df
+
+    cat = catalogo.copy()
+    cat.columns = [c.strip().lower() for c in cat.columns]
+
+    if "programa" not in cat.columns or "servicio" not in cat.columns:
+        return df
+    if key_col_df not in df.columns:
+        return df
+
+    out = df.copy()
+    out[key_col_df] = out[key_col_df].astype(str).str.strip()
+    cat["programa"] = cat["programa"].astype(str).str.strip()
+    cat["servicio"] = cat["servicio"].astype(str).str.strip()
+
+    out = out.merge(cat[["programa", "servicio"]], how="left", left_on=key_col_df, right_on="programa")
+    out.drop(columns=["programa"], inplace=True, errors="ignore")
+    out.rename(columns={"servicio": "Servicio"}, inplace=True)
+    out["Servicio"] = out["Servicio"].fillna("SIN_CLASIFICAR")
+    return out
+
+
+def _mean_numeric(series):
     return pd.to_numeric(series, errors="coerce").mean()
 
 
+def _detect_yesno_num_cols(df, num_cols):
+    yesno, likert = [], []
+    for c in num_cols:
+        s = pd.to_numeric(df[c], errors="coerce").dropna()
+        if s.empty:
+            likert.append(c)
+            continue
+        uniq = set(s.unique().tolist())
+        if uniq.issubset({0, 1}):
+            yesno.append(c)
+        else:
+            likert.append(c)
+    return yesno, likert
+
+
 def _bar_chart_auto(
-    df_in: pd.DataFrame,
-    category_col: str,
-    value_col: str,
-    value_domain: list,
-    value_title: str,
-    tooltip_cols: list,
-    max_vertical: int,
-    wrap_width_vertical: int = 18,
-    wrap_width_horizontal: int = 30,
-    height_per_row: int = 28,
-    base_height: int = 260,
-    hide_category_labels: bool = True,
+    df_in, category_col, value_col, value_domain, value_title, tooltip_cols,
+    max_vertical, wrap_width_vertical=18, wrap_width_horizontal=30,
+    height_per_row=28, base_height=260, hide_category_labels=True
 ):
     if df_in.empty:
         return None
@@ -124,36 +194,16 @@ def _bar_chart_auto(
 
     n = len(df)
 
-    cat_axis_vertical = alt.Axis(
-        title=None,
-        labels=not hide_category_labels,
-        ticks=not hide_category_labels,
-        labelAngle=0,
-        labelLimit=0,
-    )
-    cat_axis_horizontal = alt.Axis(
-        title=None,
-        labels=not hide_category_labels,
-        ticks=not hide_category_labels,
-        labelLimit=0,
-    )
-
     if n <= max_vertical:
         df["_cat_wrapped"] = df[category_col].apply(lambda x: _wrap_text(x, width=wrap_width_vertical, max_lines=3))
         return (
             alt.Chart(df)
             .mark_bar()
             .encode(
-                x=alt.X(
-                    "_cat_wrapped:N",
-                    sort=alt.SortField(field=value_col, order="descending"),
-                    axis=cat_axis_vertical,
-                ),
-                y=alt.Y(
-                    f"{value_col}:Q",
-                    scale=alt.Scale(domain=value_domain),
-                    axis=alt.Axis(title=value_title),
-                ),
+                x=alt.X("_cat_wrapped:N", sort=alt.SortField(field=value_col, order="descending"),
+                        axis=alt.Axis(title=None, labels=not hide_category_labels, ticks=not hide_category_labels)),
+                y=alt.Y(f"{value_col}:Q", scale=alt.Scale(domain=value_domain),
+                        axis=alt.Axis(title=value_title)),
                 tooltip=tooltip_cols,
             )
             .properties(height=max(320, base_height))
@@ -166,242 +216,70 @@ def _bar_chart_auto(
         alt.Chart(df)
         .mark_bar()
         .encode(
-            y=alt.Y(
-                "_cat_wrapped:N",
-                sort=alt.SortField(field=value_col, order="descending"),
-                axis=cat_axis_horizontal,
-            ),
-            x=alt.X(
-                f"{value_col}:Q",
-                scale=alt.Scale(domain=value_domain),
-                axis=alt.Axis(title=value_title),
-            ),
+            y=alt.Y("_cat_wrapped:N", sort=alt.SortField(field=value_col, order="descending"),
+                    axis=alt.Axis(title=None, labels=not hide_category_labels, ticks=not hide_category_labels)),
+            x=alt.X(f"{value_col}:Q", scale=alt.Scale(domain=value_domain),
+                    axis=alt.Axis(title=value_title)),
             tooltip=tooltip_cols,
         )
         .properties(height=dynamic_height)
     )
 
 
-def _get_gspread_client() -> gspread.Client:
-    secret_val = st.secrets.get("gcp_service_account_json", None)
-    if secret_val is None:
-        raise KeyError('Falta el secret "gcp_service_account_json".')
-
-    if isinstance(secret_val, str):
-        creds_dict = json.loads(secret_val)
-    else:
-        creds_dict = dict(secret_val)
-
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return gspread.authorize(creds)
-
-
-def _get_url_for_modalidad(modalidad: str) -> str:
-    key = URL_KEYS.get(modalidad)
-    if not key:
-        raise ValueError(f"Modalidad no reconocida: {modalidad}")
-    url = st.secrets.get(key, "").strip()
-    if not url:
-        raise KeyError(f"Falta configurar {key} en Secrets.")
-    return url
-
-
-def _make_unique_headers(raw_headers):
-    """
-    Evita crash por encabezados duplicados (gspread.get_all_records falla).
-    """
-    seen_base = {}
-    used_final = set()
-    out = []
-    prev_nonempty = ""
-
-    for h in raw_headers:
-        base = (h or "").strip()
-        if base == "":
-            base = "SIN_TITULO"
-
-        seen_base[base] = seen_base.get(base, 0) + 1
-        is_dup = seen_base[base] > 1
-
-        if base.lower().startswith("¿por qué") and (is_dup or base in used_final):
-            candidate = f"{base} — {prev_nonempty}" if prev_nonempty else base
-        elif is_dup or base in used_final:
-            candidate = f"{base} ({seen_base[base]})"
-        else:
-            candidate = base
-
-        while candidate in used_final:
-            candidate = f"{candidate}*"
-
-        out.append(candidate)
-        used_final.add(candidate)
-
-        if base != "SIN_TITULO":
-            prev_nonempty = base
-
-    return out
-
-
-def _ws_to_df(ws: gspread.Worksheet) -> pd.DataFrame:
-    values = ws.get_all_values()
-    if not values:
-        return pd.DataFrame()
-    headers = _make_unique_headers(values[0])
-    rows = values[1:]
-    return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_from_gsheets_by_url(sheet_url: str):
-    gc = _get_gspread_client()
-    sh = gc.open_by_url(sheet_url)
-
-    titles = [ws.title for ws in sh.worksheets()]
-    titles_norm = {str(t).strip().lower(): t for t in titles}
-
-    def pick(name: str) -> str | None:
-        n = name.strip().lower()
-        return titles_norm.get(n)
-
-    # PROCESADO con fallback a Respuestas
-    t_proc = pick(SHEET_PROCESADO)
-    t_resp = pick(SHEET_RESPUESTAS_FALLBACK)
-    t_map = pick(SHEET_MAPA)
-    t_cat = pick(SHEET_CATALOGO)
-
-    if not t_map:
-        raise ValueError(f"No encontré la pestaña {SHEET_MAPA}. Pestañas: {titles}")
-    if not t_cat:
-        raise ValueError(f"No encontré la pestaña {SHEET_CATALOGO}. Pestañas: {titles}")
-    if not t_proc and not t_resp:
-        raise ValueError(f"No encontré {SHEET_PROCESADO} ni {SHEET_RESPUESTAS_FALLBACK}. Pestañas: {titles}")
-
-    ws_main = sh.worksheet(t_proc) if t_proc else sh.worksheet(t_resp)
-    ws_map = sh.worksheet(t_map)
-    ws_cat = sh.worksheet(t_cat)
-
-    df_main = _ws_to_df(ws_main)
-    mapa = _ws_to_df(ws_map)
-    catalogo = _ws_to_df(ws_cat)
-
-    return df_main, mapa, catalogo, (t_proc if t_proc else t_resp)
-
-
-def _merge_catalogo(df: pd.DataFrame, catalogo: pd.DataFrame) -> pd.DataFrame:
-    """
-    Solo aplica si el sheet trae la columna:
-    "Selecciona el programa académico que estudias"
-    y el catálogo trae (programa, servicio) y opcional carrera.
-    """
-    if df.empty or catalogo.empty:
-        return df
-
-    cat = catalogo.copy()
-    cat.columns = [c.strip().lower() for c in cat.columns]
-
-    if "programa" not in cat.columns or "servicio" not in cat.columns:
-        return df
-
-    key = "Selecciona el programa académico que estudias"
-    if key not in df.columns:
-        return df
-
-    cat["programa"] = cat["programa"].astype(str).str.strip()
-    cat["servicio"] = cat["servicio"].astype(str).str.strip()
-
-    out = df.copy()
-    out[key] = out[key].astype(str).str.strip()
-
-    cols = ["programa", "servicio"]
-    if "carrera" in cat.columns:
-        cat["carrera"] = cat["carrera"].astype(str).str.strip()
-        cols.append("carrera")
-
-    out = out.merge(cat[cols], how="left", left_on=key, right_on="programa")
-    out.drop(columns=["programa"], inplace=True, errors="ignore")
-
-    out.rename(columns={"servicio": "Servicio"}, inplace=True)
-    if "carrera" in out.columns:
-        out.rename(columns={"carrera": "Carrera_Catalogo"}, inplace=True)
-
-    out["Servicio"] = out["Servicio"].fillna("SIN_CLASIFICAR")
-    return out
-
-
-def _resolver_modalidad_auto(vista: str, carrera: str | None) -> str:
-    """
-    Regla actual:
-    - Dirección General: selecciona manual.
-    - Director de carrera:
-        Si empieza con "Lic. Ejecutiva:" => Escolarizado/Ejecutivas
-        Si no => Escolarizado/Ejecutivas (por ahora; luego metemos lista de virtuales)
-    """
-    if vista == "Dirección General":
-        return ""
-    if carrera and _normalize(carrera).startswith("lic. ejecutiva:"):
-        return "Escolarizado / Ejecutivas"
-    return "Escolarizado / Ejecutivas"
-
-
-def _pick_year_source(df: pd.DataFrame) -> tuple[str, str]:
-    """
-    Regresa ("Anio", "int") si existe Anio; si no, ("Marca temporal", "date").
-    """
-    if "Anio" in df.columns:
-        return ("Anio", "int")
-    if "Marca temporal" in df.columns:
-        return ("Marca temporal", "date")
-    return ("", "")
-
-
-def _pick_servicio_col(df: pd.DataFrame) -> str:
-    for c in ["Servicio", "Carrera_Catalogo", "Servicio de procedencia", "Selecciona"]:
-        if c in df.columns:
-            return c
-    return ""
-
-
 # =========================
-# MAIN MODULE
+# Render final
 # =========================
-def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None):
+def render_encuesta_calidad(vista=None, carrera=None):
     st.subheader("Encuesta de calidad")
 
     if not vista:
         vista = "Dirección General"
 
-    # 1) Modalidad
+    # Modalidad
     if vista == "Dirección General":
         modalidad = st.selectbox("Modalidad", MODALIDADES, index=1)
     else:
-        modalidad = _resolver_modalidad_auto(vista, carrera)
+        # Director: modalidad automática (simple)
+        if carrera and _normalize(carrera) == "preparatoria":
+            modalidad = "Preparatoria"
+        elif carrera and _normalize(carrera).startswith("licenciatura ejecutiva:"):
+            modalidad = "Escolarizado / Ejecutivas"
+        else:
+            modalidad = "Escolarizado / Ejecutivas"
         st.caption(f"Modalidad asignada automáticamente: **{modalidad}**")
 
-    # 2) Cargar sheet seleccionado
-    try:
-        url = _get_url_for_modalidad(modalidad)
-        df, mapa, catalogo, hoja_usada = _load_from_gsheets_by_url(url)
-    except Exception as e:
-        st.error("No se pudieron cargar los datos desde Google Sheets para esta modalidad.")
-        st.exception(e)
+    # URL
+    url_key = URL_KEYS.get(modalidad)
+    url = (st.secrets.get(url_key, "") or "").strip()
+    if not url:
+        st.error(f"Falta configurar {url_key} en Secrets.")
         return
+
+    # Load
+    with st.spinner("Cargando datos (Google Sheets)…"):
+        df, mapa, catalogo = _load_from_gsheets_by_url(url)
 
     if df.empty:
-        st.warning(f"La hoja {hoja_usada} está vacía.")
+        st.warning("La pestaña 'Respuestas' está vacía.")
         return
 
-    # 3) Normalizar / enriquecer (si aplica)
-    df = _merge_catalogo(df, catalogo)
-
     # Fecha
-    if "Marca temporal" in df.columns:
-        df["Marca temporal"] = _to_datetime_safe(df["Marca temporal"])
+    fecha_col = "Marca temporal" if "Marca temporal" in df.columns else None
+    if fecha_col:
+        df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
-    # 4) Validación Mapa
-    required_cols = {"header_exacto", "header_num"}
-    if not required_cols.issubset(set(mapa.columns)):
-        st.error("La hoja 'Mapa_Preguntas' debe traer al menos: header_exacto, header_num.")
-        st.caption(f"Columnas detectadas en Mapa_Preguntas: {list(mapa.columns)}")
+    # Merge catálogo solo para Virtual/Escolar
+    if modalidad != "Preparatoria":
+        key_col = KEY_BY_MODALIDAD.get(modalidad)
+        if not key_col or key_col not in df.columns:
+            st.error(f"No encuentro la columna llave '{key_col}' en Respuestas.")
+            return
+        df = _merge_catalogo(df, catalogo, key_col_df=key_col)
+
+    # Validar mapa
+    required = {"header_exacto", "scale_code", "header_num"}
+    if not required.issubset(set(mapa.columns)):
+        st.error("Mapa_Preguntas debe traer: header_exacto, scale_code, header_num.")
         return
 
     mapa = mapa.copy()
@@ -412,89 +290,60 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
 
     # Num cols
     num_cols = [c for c in df.columns if str(c).endswith("_num")]
-    likert_cols = [c for c in num_cols if not _is_yesno_col(c)]
-    yesno_cols = [c for c in num_cols if _is_yesno_col(c)]
+    yesno_cols, likert_cols = _detect_yesno_num_cols(df, num_cols)
 
-    # 5) Barra de filtros
-    year_col, year_kind = _pick_year_source(df)
-    servicio_col = _pick_servicio_col(df)
-
-    # Opciones servicio
-    servicios = ["(Todos)"]
-    if servicio_col:
-        servicios += sorted(df[servicio_col].dropna().astype(str).unique().tolist())
-
-    # Opciones año
+    # =========================
+    # FILTROS (sin duplicados)
+    # =========================
     years = ["(Todos)"]
-    if year_col and year_kind == "int":
-        yrs = pd.to_numeric(df[year_col], errors="coerce").dropna().unique().astype(int).tolist()
-        years += sorted(yrs, reverse=True)
-    elif year_col and year_kind == "date" and df[year_col].notna().any():
-        yrs = df[year_col].dt.year.dropna().unique().astype(int).tolist()
-        years += sorted(yrs, reverse=True)
-
-    carreras = ["(Todas)"]
-    if "Carrera_Catalogo" in df.columns:
-        carreras += sorted(df["Carrera_Catalogo"].dropna().astype(str).unique().tolist())
+    if fecha_col and df[fecha_col].notna().any():
+        years = ["(Todos)"] + sorted(df[fecha_col].dropna().dt.year.unique().astype(int).tolist(), reverse=True)
 
     if vista == "Dirección General":
-        f1, f2, f3 = st.columns([1.2, 1.0, 2.3])
-        with f1:
-            servicio_sel = st.selectbox("Servicio/Carrera", servicios, index=0)
-        with f2:
+        if modalidad == "Preparatoria":
             year_sel = st.selectbox("Año", years, index=0)
-        with f3:
-            carrera_sel = st.selectbox("Carrera (Catálogo)", carreras, index=0)
+            servicio_sel = None
+        else:
+            c1, c2 = st.columns([1.2, 1.0])
+            with c1:
+                servicios = ["(Todos)"] + sorted(df["Servicio"].dropna().unique().tolist())
+                servicio_sel = st.selectbox("Servicio/Carrera", servicios, index=0)
+            with c2:
+                year_sel = st.selectbox("Año", years, index=0)
     else:
-        f1, f2 = st.columns([1.2, 1.0])
-        with f1:
-            servicio_sel = st.selectbox("Servicio/Carrera", servicios, index=0)
-        with f2:
-            year_sel = st.selectbox("Año", years, index=0)
-        carrera_sel = carrera
+        # Director: solo año
+        year_sel = st.selectbox("Año", years, index=0)
+        servicio_sel = None
 
     st.divider()
 
-    # 6) Aplicar filtros
+    # Aplicar filtros
     f = df.copy()
 
-    if servicio_col and servicio_sel != "(Todos)":
-        f = f[f[servicio_col].astype(str) == str(servicio_sel)]
+    if year_sel != "(Todos)" and fecha_col:
+        f = f[f[fecha_col].dt.year == int(year_sel)]
 
-    if year_col and year_sel != "(Todos)":
-        y = int(year_sel)
-        if year_kind == "int":
-            f = f[pd.to_numeric(f[year_col], errors="coerce").fillna(-1).astype(int) == y]
-        else:
-            f = f[f[year_col].dt.year == y]
-
-    if vista == "Director de carrera":
-        if not carrera_sel:
-            st.info("Selecciona una carrera en la parte superior para ver resultados.")
-            return
-        if "Carrera_Catalogo" in f.columns:
-            f = f[f["Carrera_Catalogo"].astype(str) == str(carrera_sel)]
+    if vista == "Dirección General":
+        if modalidad != "Preparatoria" and servicio_sel and servicio_sel != "(Todos)":
+            f = f[f["Servicio"] == servicio_sel]
     else:
-        if carrera_sel != "(Todas)" and "Carrera_Catalogo" in f.columns:
-            f = f[f["Carrera_Catalogo"].astype(str) == str(carrera_sel)]
+        if modalidad != "Preparatoria":
+            if not carrera:
+                st.info("Selecciona una carrera/servicio arriba.")
+                return
+            f = f[_normalize_series(f["Servicio"]) == _normalize(carrera)]
 
-    st.caption(f"Hoja usada: **{hoja_usada}** | Registros filtrados: **{len(f)}**")
-
+    st.caption(f"Registros filtrados: **{len(f)}**")
     if f.empty:
         st.warning("No hay registros con los filtros seleccionados.")
         return
 
-    # Si no hay numéricos, avisar claramente (sobre todo Prepa)
-    if not num_cols:
-        st.warning("No encontré columnas *_num. Para ver promedios/gráficas se requiere PROCESADO con columnas numéricas.")
-        st.dataframe(f.head(40), use_container_width=True)
-        return
-
+    # =========================
+    # VISTAS
+    # =========================
     tab1, tab2, tab3 = st.tabs(["Resumen", "Por sección", "Comentarios"])
 
-    # =========================
-    # TAB 1: RESUMEN
-    # =========================
+    # ---- Resumen
     with tab1:
         c1, c2, c3 = st.columns(3)
         c1.metric("Respuestas", f"{len(f)}")
@@ -524,7 +373,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
 
         sec_df = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
         if sec_df.empty:
-            st.info("No hay datos suficientes para calcular promedios por sección con los filtros actuales.")
+            st.info("No hay datos suficientes para promedios por sección.")
             return
 
         st.dataframe(sec_df.drop(columns=["sec_code"]), use_container_width=True)
@@ -545,11 +394,9 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         if sec_chart is not None:
             st.altair_chart(sec_chart, use_container_width=True)
 
-    # =========================
-    # TAB 2: POR SECCIÓN
-    # =========================
+    # ---- Por sección
     with tab2:
-        st.markdown("### Desglose por sección (comparativo de preguntas)")
+        st.markdown("### Desglose por sección (preguntas)")
 
         rows = []
         for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
@@ -577,26 +424,20 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     if pd.isna(mean_val):
                         continue
 
-                    qrows.append(
-                        {
-                            "Pregunta": m["header_exacto"],
-                            "Promedio": mean_val if not _is_yesno_col(col) else None,
-                            "% Sí": (mean_val * 100) if _is_yesno_col(col) else None,
-                            "Tipo": "Sí/No" if _is_yesno_col(col) else "Likert",
-                        }
-                    )
+                    if col in yesno_cols:
+                        qrows.append({"Pregunta": m["header_exacto"], "% Sí": mean_val * 100, "Tipo": "Sí/No"})
+                    else:
+                        qrows.append({"Pregunta": m["header_exacto"], "Promedio": mean_val, "Tipo": "Likert"})
 
                 qdf = pd.DataFrame(qrows)
                 if qdf.empty:
-                    st.info("Sin datos para esta sección con los filtros actuales.")
+                    st.info("Sin datos para esta sección.")
                     continue
 
-                # Likert
                 qdf_l = qdf[qdf["Tipo"] == "Likert"].copy()
                 if not qdf_l.empty:
                     qdf_l = qdf_l.sort_values("Promedio", ascending=False)
                     st.markdown("**Preguntas Likert**")
-
                     show_l = qdf_l[["Pregunta", "Promedio"]].reset_index(drop=True)
                     st.dataframe(show_l, use_container_width=True)
 
@@ -606,10 +447,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                         value_col="Promedio",
                         value_domain=[1, 5],
                         value_title="Promedio",
-                        tooltip_cols=[
-                            alt.Tooltip("Promedio:Q", format=".2f"),
-                            alt.Tooltip("Pregunta:N", title="Pregunta"),
-                        ],
+                        tooltip_cols=[alt.Tooltip("Promedio:Q", format=".2f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
                         max_vertical=MAX_VERTICAL_QUESTIONS,
                         wrap_width_vertical=18,
                         wrap_width_horizontal=34,
@@ -619,12 +457,10 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     if chart_l is not None:
                         st.altair_chart(chart_l, use_container_width=True)
 
-                # Sí/No
                 qdf_y = qdf[qdf["Tipo"] == "Sí/No"].copy()
                 if not qdf_y.empty:
                     qdf_y = qdf_y.sort_values("% Sí", ascending=False)
                     st.markdown("**Preguntas Sí/No**")
-
                     show_y = qdf_y[["Pregunta", "% Sí"]].reset_index(drop=True)
                     st.dataframe(show_y, use_container_width=True)
 
@@ -634,10 +470,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                         value_col="% Sí",
                         value_domain=[0, 100],
                         value_title="% Sí",
-                        tooltip_cols=[
-                            alt.Tooltip("% Sí:Q", format=".1f"),
-                            alt.Tooltip("Pregunta:N", title="Pregunta"),
-                        ],
+                        tooltip_cols=[alt.Tooltip("% Sí:Q", format=".1f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
                         max_vertical=MAX_VERTICAL_QUESTIONS,
                         wrap_width_vertical=18,
                         wrap_width_horizontal=34,
@@ -647,17 +480,14 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     if chart_y is not None:
                         st.altair_chart(chart_y, use_container_width=True)
 
-    # =========================
-    # TAB 3: COMENTARIOS
-    # =========================
+    # ---- Comentarios
     with tab3:
         st.markdown("### Comentarios y respuestas abiertas")
 
         open_cols = [
-            c
-            for c in f.columns
+            c for c in f.columns
             if (not str(c).endswith("_num"))
-            and any(k in str(c).lower() for k in ["¿por qué", "comentario", "sugerencia", "escríbelo", "escribelo", "descríbelo", "describelo"])
+            and any(k in str(c).lower() for k in ["¿por qué", "comentario", "sugerencia", "escríbelo", "escribelo"])
         ]
 
         if not open_cols:
