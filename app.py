@@ -1,21 +1,17 @@
 import streamlit as st
 
-# Configuración básica de la página (DEBE ser lo primero)
 st.set_page_config(page_title="Dirección Académica", layout="wide")
 
-# Intentar importar módulos con diagnóstico (evita página en blanco)
+# Import seguro (evita pantalla en blanco)
 try:
     import encuesta_calidad
 except Exception as e:
-    st.error("Falló el import de encuesta_calidad.py (por eso veías la página en blanco).")
+    st.error("Falló el import de encuesta_calidad.py.")
     st.exception(e)
     st.stop()
 
-# ----------------------------------------------------
-# UI base
-# ----------------------------------------------------
+# Escudo
 logo_url = "udl_logo.png"
-
 col1, col2 = st.columns([1, 4])
 with col1:
     st.image(logo_url, use_container_width=True)
@@ -95,14 +91,8 @@ seccion = st.selectbox(
 st.divider()
 
 if seccion == "Encuesta de calidad":
-    try:
-        encuesta_calidad.render_encuesta_calidad(vista=vista, carrera=carrera)
-    except Exception as e:
-        st.error("Falló la ejecución de render_encuesta_calidad().")
-        st.exception(e)
-
+    encuesta_calidad.render_encuesta_calidad(vista=vista, carrera=carrera)
 elif seccion == "Observación de clases":
     st.warning("Observación de clases está temporalmente deshabilitado.")
-
 else:
     st.info("Módulo en construcción.")
