@@ -1,5 +1,6 @@
 import streamlit as st
 import encuesta_calidad
+import observacion_clases  # <- NUEVO
 
 # ============================================================
 # Configuración básica (antes de cualquier st.*)
@@ -30,7 +31,7 @@ vista = st.selectbox(
 )
 
 # ============================================================
-# Catálogo (ajustado a tu lista)
+# Catálogo (ajustado)
 # ============================================================
 CATALOGO_CARRERAS = [
     "Preparatoria",
@@ -56,9 +57,9 @@ CATALOGO_CARRERAS = [
     "Licenciatura Ejecutiva: Informática",
     "Licenciatura Ejecutiva: Mercadotecnia",
     "Licenciatura Ejecutiva: Pedagogía",
-    "Maestría en Administración de Negocios (MBA",
+    "Maestría en Administración de Negocios (MBA)",
     "Maestría en Derecho Corporativo",
-    "Maestría en Desarrollo del Potencial Humano y Organizacional (Coaching",
+    "Maestría en Desarrollo del Potencial Humano y Organizacional (Coaching)",
     "Maestría en Odontología Legal y Forense",
     "Maestría en Psicoterapia Familiar",
     "Maestría en Psicoterapia Psicoanalítica",
@@ -66,10 +67,10 @@ CATALOGO_CARRERAS = [
     "Maestría en Finanzas",
     "Maestría en Educación Especial",
     "Maestría: Dirección de Recursos Humanos",
-    "Maestría:Finanzas",
-    "Maestría:Gestión de Tecnologías de la Información",
-    "Maestría:Docencia",
-    "Maestría:Educación Especial",
+    "Maestría: Finanzas",
+    "Maestría: Gestión de Tecnologías de la Información",
+    "Maestría: Docencia",
+    "Maestría: Educación Especial",
     "Maestría: Entrenamiento Deportivo",
     "Maestría: Tecnología e Innovación Educativa",
     "Licenciatura Entrenamiento Deportivo",
@@ -104,26 +105,32 @@ st.divider()
 # ============================================================
 # Router
 # ============================================================
-if seccion == "Encuesta de calidad":
-    encuesta_calidad.render_encuesta_calidad(vista=vista, carrera=carrera)
+try:
+    if seccion == "Encuesta de calidad":
+        encuesta_calidad.render_encuesta_calidad(vista=vista, carrera=carrera)
 
-elif seccion == "Observación de clases":
-    st.warning("Observación de clases está temporalmente deshabilitado.")
+    elif seccion == "Observación de clases":
+        # <- AQUÍ YA SE EJECUTA TU MÓDULO
+        observacion_clases.render_observacion_clases(vista=vista, carrera=carrera)
 
-elif seccion == "Evaluación docente":
-    st.info("Módulo en construcción: Evaluación docente")
+    elif seccion == "Evaluación docente":
+        st.info("Módulo en construcción: Evaluación docente")
 
-else:
-    st.subheader("Panel inicial")
-    st.write(f"Vista actual: **{vista}**")
-
-    if carrera:
-        st.write(f"Carrera seleccionada: **{carrera}**")
     else:
-        st.write("Carrera seleccionada: *no aplica para esta vista*")
+        st.subheader("Panel inicial")
+        st.write(f"Vista actual: **{vista}**")
 
-    st.write(f"Apartado seleccionado: **{seccion}**")
-    st.info(
-        "En los siguientes pasos conectaremos esta sección con la información en Google Sheets "
-        "para mostrar análisis específicos según la vista seleccionada."
-    )
+        if carrera:
+            st.write(f"Carrera seleccionada: **{carrera}**")
+        else:
+            st.write("Carrera seleccionada: *no aplica para esta vista*")
+
+        st.write(f"Apartado seleccionado: **{seccion}**")
+        st.info(
+            "En los siguientes pasos conectaremos esta sección con la información en Google Sheets "
+            "para mostrar análisis específicos según la vista seleccionada."
+        )
+
+except Exception as e:
+    st.error("Ocurrió un error al cargar el apartado seleccionado.")
+    st.exception(e)
