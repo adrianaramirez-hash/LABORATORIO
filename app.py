@@ -7,6 +7,16 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 import altair as alt
 
+import streamlit as st
+import encuesta_calidad
+import observacion_clases
+
+# DEBUG temporal: valida que exista el secret (no imprime valores)
+if "gcp_service_account_json" not in st.secrets:
+    st.error("Falta el Secret: gcp_service_account_json en Streamlit Cloud → Settings → Secrets")
+    st.stop()
+
+
 # --------------------------------------------------
 # CONEXIÓN A GOOGLE SHEETS
 # --------------------------------------------------
