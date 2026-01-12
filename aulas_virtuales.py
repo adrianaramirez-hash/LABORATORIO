@@ -19,14 +19,6 @@ NUM_COLS = {
     "formato_alt": "formato_alternativo_num",
 }
 
-# Columnas texto (por si quieres mostrar ejemplos después)
-TEXT_COLS = {
-    "beneficios": "En caso de considerarlo útil, ¿Qué beneficios principales identifica?",
-    "limitaciones": "En caso de considerarlo poco útil o nada útil, ¿Qué limitaciones o dificultades ha encontrado?",
-    "mejoras": "¿Qué mejoras sugiere para optimizar el uso de las Aulas Virtuales en la planeación docente?",
-    "cual_alt": "¿Cuál?",
-}
-
 
 def _get_av_url() -> str:
     url = st.secrets.get("AV_URL", "").strip()
@@ -139,6 +131,80 @@ def _bar(df: pd.DataFrame, title: str):
     st.altair_chart(chart, use_container_width=True)
 
 
+def _metodologia_expander():
+    with st.expander("Metodología de cálculo (escalas y porcentajes)", expanded=False):
+        st.markdown(
+            """
+**Fuente de cálculo:** columnas numéricas generadas en la hoja `AULAS_VIRTUALES_FORM`.
+
+### 1) Uso del Aula Virtual (Alumnos / Docente) — escala 0–2
+- **Nunca = 0**
+- **A veces = 1**
+- **Siempre = 2**
+
+**Promedio (0–2):** promedio aritmético de la columna numérica.  
+**% Siempre:** (respuestas con valor **2** / total de respuestas válidas) × 100.
+
+Columnas:
+- `alumnos_uso_num`
+- `docente_uso_num`
+
+### 2) Definición del curso — escala 0–2
+- **No lo realicé = 0**
+- **Sí, pero incompletas = 1**
+- **Sí, todas las secciones = 2**
+
+**% Definición completa:** valor **2**.  
+**% Definición NO realizada:** valor **0**.
+
+Columna:
+- `definicion_curso_num`
+
+### 3) Sesiones/Bloques agregados — escala 0–2
+- **No lo realicé = 0**
+- **Sí, pero de forma parcial = 1**
+- **Sí, todas las semanas = 2**
+
+Columna:
+- `bloques_agregados_num`
+
+### 4) Frecuencia de actualización — escala 0–3
+- **No actualicé = 0**
+- **Solo en algunas ocasiones = 1**
+- **Quincenalmente = 2**
+- **Cada semana = 3**
+
+Columna:
+- `frecuencia_actualizacion_num`
+
+### 5) Utilidad percibida — escala 0–3
+- **Nada útil = 0**
+- **Poco útil = 1**
+- **Útil = 2**
+- **Muy útil = 3**
+
+Columna:
+- `utilidad_num`
+
+### 6) Secciones completadas — conteo 0–5
+- Se calcula como el **número de secciones seleccionadas** en la multiselección.
+- **“Ninguna” = 0**
+
+Columna:
+- `def_secciones_count`
+
+### 7) Formato alternativo — escala 0–1
+- **No = 0**
+- **Sí = 1**
+
+Columna:
+- `formato_alternativo_num`
+
+**Nota:** Los porcentajes se calculan únicamente con respuestas válidas (se excluyen celdas vacías o no numéricas).
+            """
+        )
+
+
 def mostrar(vista: str, carrera: str | None = None):
     st.subheader("Aulas virtuales")
 
@@ -197,7 +263,7 @@ def mostrar(vista: str, carrera: str | None = None):
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
-    # Selector interno: servicio / escuela
+    # Selector interno: servicio / escuela + (Todos)
     # ---------------------------
     with st.container(border=True):
         st.markdown("**Filtro del apartado (Aulas Virtuales)**")
@@ -215,18 +281,25 @@ def mostrar(vista: str, carrera: str | None = None):
         )
         servicios_disponibles = sorted(set([s for s in servicios_disponibles if s]))
 
+        # Opciones base: siempre incluir "(Todos)" para que DG vea resumen general
+        opciones = ["(Todos)"]
+
+        # Si hay escuela_base, agregamos la opción de agrupar por escuela (solo si aplica)
         if escuela_base and str(escuela_base).strip().lower() not in ["nan", "none", ""]:
             servicios_escuela = (
                 cat[cat["escuela"] == escuela_base]["servicio_std"]
                 .dropna().astype(str).str.strip().unique().tolist()
             )
             servicios_escuela = sorted(set([s for s in servicios_escuela if s]))
-            opciones = [f"Todos los servicios de {escuela_base}"] + servicios_escuela
+            opciones += [f"Todos los servicios de {escuela_base}"] + servicios_escuela
         else:
-            opciones = servicios_disponibles
+            opciones += servicios_disponibles
 
+        # Default:
+        # - Dirección General: "(Todos)"
+        # - Director: su carrera/servicio si está, si no "(Todos)"
         default_idx = 0
-        if servicio_base and servicio_base in opciones:
+        if vista != "Dirección General" and servicio_base and servicio_base in opciones:
             default_idx = opciones.index(servicio_base)
 
         servicio_sel = st.selectbox(
@@ -238,10 +311,15 @@ def mostrar(vista: str, carrera: str | None = None):
     # ---------------------------
     # Filtrado
     # ---------------------------
-    if servicio_sel.startswith("Todos los servicios de "):
+    if servicio_sel == "(Todos)":
+        f = df.copy()
+        unidad_txt = "Todos los servicios"
+    elif servicio_sel.startswith("Todos los servicios de "):
         f = df[df["escuela"] == escuela_base].copy()
+        unidad_txt = f"Escuela: {escuela_base}"
     else:
         f = df[df["servicio_std"] == servicio_sel].copy()
+        unidad_txt = f"Servicio: {servicio_sel}"
 
     if f.empty:
         st.warning("No hay registros con el filtro seleccionado.")
@@ -256,9 +334,15 @@ def mostrar(vista: str, carrera: str | None = None):
         fmax = f[fecha_col].max()
         years = sorted(f[fecha_col].dt.year.dropna().unique().astype(int).tolist())
         year_txt = str(years[0]) if len(years) == 1 else f"{years[0]}–{years[-1]}"
-        st.caption(f"Periodo del levantamiento: **{fmin:%d %b %Y} – {fmax:%d %b %Y}** | Año: **{year_txt}** | Respuestas: **{n}**")
+        st.caption(
+            f"{unidad_txt} | Periodo del levantamiento: **{fmin:%d %b %Y} – {fmax:%d %b %Y}** | "
+            f"Año: **{year_txt}** | Respuestas: **{n}**"
+        )
     else:
-        st.caption(f"Respuestas: **{n}** (sin fecha válida en 'Marca temporal')")
+        st.caption(f"{unidad_txt} | Respuestas: **{n}** (sin fecha válida en 'Marca temporal')")
+
+    # Metodología arriba (antes de tabs)
+    _metodologia_expander()
 
     # ---------------------------
     # Validar columnas numéricas
@@ -271,13 +355,12 @@ def mostrar(vista: str, carrera: str | None = None):
         )
         return
 
-    # Convertir a num para cálculo
     fx = f.copy()
     for col in NUM_COLS.values():
         fx[col] = _as_num(fx[col])
 
     # ---------------------------
-    # Tabs (sin pestaña 3)
+    # Tabs (2)
     # ---------------------------
     tab1, tab2 = st.tabs(["Resumen ejecutivo", "Diagnóstico por secciones"])
 
@@ -285,16 +368,13 @@ def mostrar(vista: str, carrera: str | None = None):
     # TAB 1: Resumen ejecutivo
     # ============================================================
     with tab1:
-        # KPIs (tarjetas)
         c1, c2, c3, c4, c5, c6 = st.columns(6)
 
-        # Adopción (Siempre/A veces/Nunca -> 2/1/0)
         alumnos_avg = _avg(fx[NUM_COLS["alumnos"]])
         docente_avg = _avg(fx[NUM_COLS["docente"]])
         alumnos_siempre = _pct_eq(fx[NUM_COLS["alumnos"]], 2)
         docente_siempre = _pct_eq(fx[NUM_COLS["docente"]], 2)
 
-        # Planeación
         def_avg = _avg(fx[NUM_COLS["definicion"]])
         def_completa = _pct_eq(fx[NUM_COLS["definicion"]], 2)
         def_no = _pct_eq(fx[NUM_COLS["definicion"]], 0)
@@ -321,13 +401,11 @@ def mostrar(vista: str, carrera: str | None = None):
         c10.metric("Frecuencia (prom 0–3)", f"{freq_avg:.2f}" if freq_avg is not None else "—")
         c11.metric("Utilidad (prom 0–3)", f"{util_avg:.2f}" if util_avg is not None else "—")
 
-        # Formato alternativo
         alt_si = _pct_eq(fx[NUM_COLS["formato_alt"]], 1)
         c12.metric("% Quiere formato alternativo", f"{alt_si:.1f}%" if alt_si is not None else "—")
 
         st.divider()
 
-        # Gráficos compactos (distribuciones)
         g1, g2 = st.columns(2)
         with g1:
             _bar(_dist_counts(fx[NUM_COLS["alumnos"]]), "Uso del Aula Virtual (Alumnos) 0–2")
@@ -346,7 +424,6 @@ def mostrar(vista: str, carrera: str | None = None):
         with g6:
             _bar(_dist_counts(fx[NUM_COLS["utilidad"]]), "Utilidad percibida 0–3")
 
-        # Secciones completadas (solo si hay datos)
         if fx[NUM_COLS["secciones_count"]].notna().any():
             st.divider()
             _bar(_dist_counts(fx[NUM_COLS["secciones_count"]]), "Secciones completadas (conteo)")
@@ -361,47 +438,56 @@ def mostrar(vista: str, carrera: str | None = None):
         if docente_avg is not None and alumnos_avg is not None:
             brecha = docente_avg - alumnos_avg
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Prom. alumnos (0–2)", f"{alumnos_avg:.2f}" if alumnos_avg is not None else "—")
-        c2.metric("Prom. docente (0–2)", f"{docente_avg:.2f}" if docente_avg is not None else "—")
-        c3.metric("Brecha (docente - alumnos)", f"{brecha:.2f}" if brecha is not None else "—")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Prom. alumnos (0–2)", f"{alumnos_avg:.2f}" if alumnos_avg is not None else "—")
+        d2.metric("Prom. docente (0–2)", f"{docente_avg:.2f}" if docente_avg is not None else "—")
+        d3.metric("Brecha (docente - alumnos)", f"{brecha:.2f}" if brecha is not None else "—")
 
         st.divider()
         st.markdown("### Sección II. Llenado de la planeación")
 
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric("% Definición completa", f"{def_completa:.1f}%" if def_completa is not None else "—")
-        cc2.metric("% Definición incompleta", f"{_pct_eq(fx[NUM_COLS['definicion']], 1):.1f}%" if _pct_eq(fx[NUM_COLS['definicion']], 1) is not None else "—")
-        cc3.metric("% Definición NO", f"{def_no:.1f}%" if def_no is not None else "—")
+        e1, e2, e3, e4 = st.columns(4)
+        e1.metric("% Definición completa", f"{def_completa:.1f}%" if def_completa is not None else "—")
+        inc = _pct_eq(fx[NUM_COLS["definicion"]], 1)
+        e2.metric("% Definición incompleta", f"{inc:.1f}%" if inc is not None else "—")
+        e3.metric("% Definición NO", f"{def_no:.1f}%" if def_no is not None else "—")
         sc_avg = _avg(fx[NUM_COLS["secciones_count"]])
-        cc4.metric("Prom. secciones completadas", f"{sc_avg:.2f}" if sc_avg is not None else "—")
+        e4.metric("Prom. secciones completadas", f"{sc_avg:.2f}" if sc_avg is not None else "—")
 
         st.divider()
         st.markdown("### Sección II. Sesiones/Bloques y actualización")
 
-        dd1, dd2, dd3, dd4 = st.columns(4)
-        dd1.metric("% Bloques todas semanas", f"{bloques_todas:.1f}%" if bloques_todas is not None else "—")
-        dd2.metric("% Bloques parcial", f"{_pct_eq(fx[NUM_COLS['bloques']], 1):.1f}%" if _pct_eq(fx[NUM_COLS['bloques']], 1) is not None else "—")
-        dd3.metric("% Bloques NO", f"{_pct_eq(fx[NUM_COLS['bloques']], 0):.1f}%" if _pct_eq(fx[NUM_COLS['bloques']], 0) is not None else "—")
-        dd4.metric("Frecuencia prom (0–3)", f"{freq_avg:.2f}" if freq_avg is not None else "—")
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("% Bloques todas semanas", f"{bloques_todas:.1f}%" if bloques_todas is not None else "—")
+        par = _pct_eq(fx[NUM_COLS["bloques"]], 1)
+        f2.metric("% Bloques parcial", f"{par:.1f}%" if par is not None else "—")
+        no_b = _pct_eq(fx[NUM_COLS["bloques"]], 0)
+        f3.metric("% Bloques NO", f"{no_b:.1f}%" if no_b is not None else "—")
+        f4.metric("Frecuencia prom (0–3)", f"{freq_avg:.2f}" if freq_avg is not None else "—")
 
         st.divider()
         st.markdown("### Sección III. Utilidad y sugerencias")
 
-        ee1, ee2, ee3, ee4 = st.columns(4)
-        ee1.metric("Utilidad prom (0–3)", f"{util_avg:.2f}" if util_avg is not None else "—")
-        ee2.metric("% Muy útil", f"{_pct_eq(fx[NUM_COLS['utilidad']], 3):.1f}%" if _pct_eq(fx[NUM_COLS['utilidad']], 3) is not None else "—")
-        ee3.metric("% Poco/Nada útil", f"{(_pct_eq(fx[NUM_COLS['utilidad']], 1) or 0) + (_pct_eq(fx[NUM_COLS['utilidad']], 0) or 0):.1f}%" if ( _pct_eq(fx[NUM_COLS['utilidad']], 1) is not None or _pct_eq(fx[NUM_COLS['utilidad']], 0) is not None ) else "—")
-        ee4.metric("% Quiere formato alternativo", f"{alt_si:.1f}%" if alt_si is not None else "—")
+        g1, g2, g3, g4 = st.columns(4)
+        g1.metric("Utilidad prom (0–3)", f"{util_avg:.2f}" if util_avg is not None else "—")
+        muy = _pct_eq(fx[NUM_COLS["utilidad"]], 3)
+        g2.metric("% Muy útil", f"{muy:.1f}%" if muy is not None else "—")
+        poco = _pct_eq(fx[NUM_COLS["utilidad"]], 1)
+        nada = _pct_eq(fx[NUM_COLS["utilidad"]], 0)
+        pn = None
+        if poco is not None or nada is not None:
+            pn = (poco or 0) + (nada or 0)
+        g3.metric("% Poco/Nada útil", f"{pn:.1f}%" if pn is not None else "—")
+        g4.metric("% Quiere formato alternativo", f"{alt_si:.1f}%" if alt_si is not None else "—")
 
-        # Nota: aquí todavía NO hacemos minería de texto (lo dejamos para un paso posterior)
-        st.info("Siguiente mejora: clasificar Beneficios/Limitaciones/Mejoras por categorías para graficar hallazgos sin tabla cruda.")
+        st.info(
+            "Siguiente mejora: clasificar Beneficios/Limitaciones/Mejoras por categorías para graficar hallazgos "
+            "sin depender de una tabla completa."
+        )
 
         st.divider()
         st.markdown("### Sección IV. Formato alternativo")
 
-        ff1, ff2 = st.columns(2)
-        ff1.metric("% Sí", f"{alt_si:.1f}%" if alt_si is not None else "—")
-        ff2.metric("% No", f"{(100 - alt_si):.1f}%" if alt_si is not None else "—")
-
-
+        h1, h2 = st.columns(2)
+        h1.metric("% Sí", f"{alt_si:.1f}%" if alt_si is not None else "—")
+        h2.metric("% No", f"{(100 - alt_si):.1f}%" if alt_si is not None else "—")
