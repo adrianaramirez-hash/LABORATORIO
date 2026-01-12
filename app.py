@@ -4,7 +4,6 @@ import encuesta_calidad
 import observacion_clases
 import aulas_virtuales
 
-
 # ============================================================
 # Configuración básica (antes de cualquier st.*)
 # ============================================================
@@ -21,7 +20,9 @@ st.divider()
 # Muestra rápidamente si faltan secrets (sin exponer valores)
 try:
     secretos_disponibles = list(st.secrets.keys())
-    st.info(f"Secrets detectados: {', '.join(secretos_disponibles) if secretos_disponibles else '(ninguno)'}")
+    st.info(
+        f"Secrets detectados: {', '.join(secretos_disponibles) if secretos_disponibles else '(ninguno)'}"
+    )
 except Exception as e:
     st.error("No fue posible leer st.secrets.")
     st.exception(e)
@@ -154,8 +155,8 @@ try:
         st.info("Módulo en construcción: Evaluación docente")
 
     elif seccion == "Aulas virtuales":
-    st.subheader("Aulas virtuales")
-    aulas_virtuales.mostrar(vista=vista, carrera=carrera)
+        st.subheader("Aulas virtuales")
+        aulas_virtuales.mostrar(vista=vista, carrera=carrera)
 
     else:
         st.subheader("Panel inicial")
