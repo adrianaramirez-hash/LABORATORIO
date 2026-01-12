@@ -3,6 +3,7 @@ import streamlit as st
 import encuesta_calidad
 import observacion_clases
 import aulas_virtuales
+from examenes_departamentales import render_examenes_departamentales
 
 # ============================================================
 # Configuración básica (antes de cualquier st.*)
@@ -153,6 +154,12 @@ try:
 
     elif seccion == "Evaluación docente":
         st.info("Módulo en construcción: Evaluación docente")
+
+    elif seccion == "Exámenes departamentales":
+        st.subheader("Exámenes departamentales")
+        render_examenes_departamentales(
+            "https://docs.google.com/spreadsheets/d/1GqlE9SOkSNCdA9mi65hk45uuLAao8GHHoresiyhRfQU/edit"
+        )
 
     elif seccion == "Aulas virtuales":
         st.subheader("Aulas virtuales")
