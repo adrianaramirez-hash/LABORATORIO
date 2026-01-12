@@ -20,7 +20,7 @@ SCOPES = [
 TAB_BASE = "BASE_CONSOLIDADA"
 TAB_RESP = "RESPUESTAS_LARGAS"
 
-# Columnas esperadas (ajusta aquí si cambian encabezados en tu Sheet)
+# Columnas esperadas (en BASE_CONSOLIDADA puede haber duplicados; usamos las primeras ocurrencias)
 COLS_BASE_REQUIRED = ["Carrera", "Version", "Orden", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"]
 COLS_RESP_REQUIRED = ["Carrera", "Version", "Matricula", "Grupo", "Correo", "Orden_forms", "ID_reactivo", "Respuesta_alumno"]
 
@@ -32,13 +32,11 @@ COLS_RESP_REQUIRED = ["Carrera", "Version", "Matricula", "Grupo", "Correo", "Ord
 def _get_gspread_client() -> gspread.Client:
     raw = st.secrets["gcp_service_account_json"]
 
-    # Streamlit puede entregar dict, AttrDict (Mapping) o string JSON
     if isinstance(raw, Mapping):
         creds_dict = dict(raw)
     elif isinstance(raw, (str, bytes, bytearray)):
         creds_dict = json.loads(raw)
     else:
-        # Último recurso: intentar convertir a dict, si no, error claro
         try:
             creds_dict = dict(raw)
         except Exception as e:
@@ -51,14 +49,39 @@ def _get_gspread_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
+def _dedupe_columns(cols: list[str]) -> list[str]:
+    """Convierte encabezados duplicados a nombres únicos: Orden, Orden__2, Orden__3..."""
+    seen = {}
+    out = []
+    for c in cols:
+        name = str(c).strip()
+        if name in seen:
+            seen[name] += 1
+            out.append(f"{name}__{seen[name]}")
+        else:
+            seen[name] = 1
+            out.append(name)
+    return out
+
+
 @st.cache_data(ttl=300)
 def _load_worksheet_df(spreadsheet_url: str, worksheet_name: str) -> pd.DataFrame:
     client = _get_gspread_client()
     sh = client.open_by_url(spreadsheet_url)
     ws = sh.worksheet(worksheet_name)
-    data = ws.get_all_records()
-    df = pd.DataFrame(data)
-    df.columns = [str(c).strip() for c in df.columns]  # normaliza columnas
+
+    values = ws.get_all_values()  # <-- tolera encabezados duplicados
+    if not values or len(values) < 2:
+        return pd.DataFrame()
+
+    raw_cols = values[0]
+    cols = _dedupe_columns(raw_cols)
+    rows = values[1:]
+
+    df = pd.DataFrame(rows, columns=cols)
+
+    # Limpia columnas totalmente vacías
+    df = df.dropna(axis=1, how="all")
     return df
 
 
@@ -85,6 +108,21 @@ def _pct(x: float) -> str:
         return "—"
 
 
+def _to_num(s: pd.Series, default: float = 0.0) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(default)
+
+
+def _first_col(df: pd.DataFrame, name: str) -> str:
+    """Si existe name, úsalo; si existe name__2, name__3, etc., preferimos el primero (name)."""
+    if name in df.columns:
+        return name
+    # fallback: por si el primero quedó como name__2 (raro)
+    for c in df.columns:
+        if c == name or c.startswith(name + "__"):
+            return c
+    return name
+
+
 # -----------------------------
 # Main render
 # -----------------------------
@@ -95,10 +133,22 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
         base = _load_worksheet_df(spreadsheet_url, TAB_BASE)
         resp = _load_worksheet_df(spreadsheet_url, TAB_RESP)
 
+    if base.empty:
+        st.error("BASE_CONSOLIDADA está vacía o no tiene datos.")
+        st.stop()
+    if resp.empty:
+        st.error("RESPUESTAS_LARGAS está vacía o no tiene datos.")
+        st.stop()
+
+    # Asegura columnas requeridas (usando el primer 'Orden' válido si hay duplicados)
+    # Nota: si tienes Orden y Orden__2, la validación ya pasa porque existe "Orden"
     ok_base, _ = _ensure_columns(base, COLS_BASE_REQUIRED, TAB_BASE)
     ok_resp, _ = _ensure_columns(resp, COLS_RESP_REQUIRED, TAB_RESP)
     if not (ok_base and ok_resp):
         st.stop()
+
+    # Detecta columna Orden (por si la primera se renombró)
+    col_orden = _first_col(base, "Orden")
 
     # Normalizaciones clave
     for c in ["Carrera", "Version", "ID_reactivo", "Area", "Materia"]:
@@ -109,8 +159,8 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
     base["Clave"] = _safe_upper(base["Clave"])
     resp["Respuesta_alumno"] = _safe_upper(resp["Respuesta_alumno"])
 
-    # Puntos numéricos (por si hay vacíos)
-    base["Puntos"] = pd.to_numeric(base["Puntos"], errors="coerce").fillna(1.0)
+    # Puntos numéricos
+    base["Puntos"] = _to_num(base["Puntos"], default=1.0)
 
     # Selector principal (Todos / Carrera)
     carreras = sorted([c for c in base["Carrera"].dropna().unique() if c and c.lower() != "nan"])
@@ -124,7 +174,6 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
         base_v = base.copy()
         resp_v = resp.copy()
 
-    # Versiones disponibles (dependiendo del filtro de carrera)
     versiones = sorted([v for v in base_v["Version"].dropna().unique() if v and v.lower() != "nan"])
     sel_version = st.selectbox("Versión", ["Todas"] + versiones, index=0)
 
@@ -132,7 +181,7 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
         base_v = base_v[base_v["Version"] == sel_version].copy()
         resp_v = resp_v[resp_v["Version"] == sel_version].copy()
 
-    # Merge respuestas + base (many_to_one)
+    # Merge respuestas + base
     df = resp_v.merge(
         base_v[["Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"]],
         on=["Carrera", "Version", "ID_reactivo"],
@@ -147,19 +196,18 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
     if pct_sin_match > 0:
         st.warning(
             f"Hay {sin_match:,} respuestas ({pct_sin_match:.1%}) que no encontraron match con la base. "
-            f"Normalmente es por Carrera/Version/ID_reactivo inconsistentes."
+            f"Revisa consistencia de Carrera/Version/ID_reactivo."
         )
 
-    # Acierto y puntos obtenidos
+    # Acierto y puntos
     df["Acierto"] = (df["Respuesta_alumno"] == df["Clave"]).astype("Int64")
     df["Puntos_obtenidos"] = (df["Acierto"].fillna(0).astype(float) * df["Puntos"].fillna(0)).astype(float)
 
-    # Puntos posibles (base)
+    # KPIs
     puntos_posibles = float(base_v["Puntos"].sum()) if len(base_v) else 0.0
     puntos_obtenidos = float(df["Puntos_obtenidos"].sum()) if len(df) else 0.0
     promedio_general = (puntos_obtenidos / puntos_posibles) if puntos_posibles else 0.0
 
-    # Conteos útiles
     alumnos = df[["Matricula", "Correo"]].drop_duplicates()
     n_alumnos = int(len(alumnos))
 
@@ -171,11 +219,8 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
 
     st.divider()
 
-    # -----------------------------
     # Promedio por Área
-    # -----------------------------
     st.subheader("Promedio por área")
-
     area_pos = (
         base_v.groupby("Area", dropna=False, as_index=False)["Puntos"]
         .sum()
@@ -191,8 +236,8 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
         lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles"]) if r["Puntos_posibles"] else 0.0,
         axis=1,
     )
-
     area = area.sort_values("Promedio_area", ascending=False)
+
     st.dataframe(
         area[["Area", "Promedio_area", "Puntos_obtenidos", "Puntos_posibles"]],
         use_container_width=True,
@@ -215,11 +260,8 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
 
     st.divider()
 
-    # -----------------------------
     # Promedio por Materia
-    # -----------------------------
     st.subheader("Promedio por materia")
-
     mat_pos = (
         base_v.groupby("Materia", dropna=False, as_index=False)["Puntos"]
         .sum()
@@ -259,12 +301,8 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
 
     st.divider()
 
-    # -----------------------------
-    # (Opcional) Tabla de alumnos: promedio individual
-    # -----------------------------
     with st.expander("Detalle por alumno (promedio individual)"):
         puntos_pos = puntos_posibles if puntos_posibles else 0.0
-
         by_alumno = (
             df.groupby(["Matricula", "Correo", "Grupo"], dropna=False, as_index=False)["Puntos_obtenidos"]
             .sum()
