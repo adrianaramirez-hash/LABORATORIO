@@ -2,6 +2,8 @@
 import streamlit as st
 import encuesta_calidad
 import observacion_clases
+import aulas_virtuales
+
 
 # ============================================================
 # Configuración básica (antes de cualquier st.*)
@@ -150,6 +152,10 @@ try:
 
     elif seccion == "Evaluación docente":
         st.info("Módulo en construcción: Evaluación docente")
+
+    elif seccion == "Aulas virtuales":
+    st.subheader("Aulas virtuales")
+    aulas_virtuales.mostrar(vista=vista, carrera=carrera)
 
     else:
         st.subheader("Panel inicial")
