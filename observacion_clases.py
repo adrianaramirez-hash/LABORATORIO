@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 import json
+from collections.abc import Mapping
 from google.oauth2.service_account import Credentials
 import altair as alt
 
@@ -21,20 +22,13 @@ def cargar_datos_desde_sheets():
       - Hoja: 'Respuestas de formulario 1'
       - Hoja: 'Cortes'
 
-    Mejoras:
-      - Credenciales robustas: st.secrets["gcp_service_account_json"] puede ser dict o str JSON.
-      - URL de Sheets desde secrets: OC_SHEET_URL.
+    Robusto con st.secrets:
+      - gcp_service_account_json puede venir como dict / AttrDict (Mapping) o string JSON.
     """
-    # Credenciales desde secrets (robusto: string JSON o dict)
     raw = st.secrets["gcp_service_account_json"]
- from collections.abc import Mapping
-creds_dict = dict(raw) if isinstance(raw, Mapping) else json.loads(raw)
+    creds_dict = dict(raw) if isinstance(raw, Mapping) else json.loads(raw)
 
-
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=SCOPES,
-    )
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
 
     # URL desde secrets (NO hardcode)
@@ -146,6 +140,7 @@ def render_observacion_clases(vista: str = "Dirección General", carrera: str | 
         df_respuestas[col_fecha], errors="coerce", dayfirst=True
     )
 
+    # Columnas clave
     COL_SERVICIO = "Indica el servicio"
     COL_DOCENTE = "Nombre del docente"
 
@@ -154,7 +149,7 @@ def render_observacion_clases(vista: str = "Dirección General", carrera: str | 
             st.error(f"No se encontró la columna '{col}' en la hoja de respuestas.")
             st.stop()
 
-    # Columna normalizada de servicio
+    # Columna normalizada de servicio (para comparaciones robustas)
     df_respuestas["Servicio_norm"] = df_respuestas[COL_SERVICIO].apply(normalizar_texto)
 
     # Normalizamos la carrera que llega a la función (para vista director)
@@ -257,11 +252,12 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     # --------------------------------------------------
     st.markdown("### Filtros")
 
+    # Opciones de cortes
     opciones_cortes = ["Todos los cortes"]
     if not df_cortes.empty and "Corte" in df_cortes.columns:
         opciones_cortes += list(df_cortes["Corte"].astype(str))
 
-    # Agregamos explícitamente "Sin corte" si aparece en datos
+    # Agregamos explícitamente la opción "Sin corte" si existe en los datos
     if "Sin corte" in df_respuestas["Corte"].unique():
         opciones_cortes.append("Sin corte")
 
@@ -270,11 +266,12 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     with col_f1:
         corte_seleccionado = st.selectbox("Corte", opciones_cortes)
 
+    # Dataframe base para construir opciones de servicio
     df_para_filtros = df_respuestas.copy()
     if corte_seleccionado != "Todos los cortes":
         df_para_filtros = df_para_filtros[df_para_filtros["Corte"] == corte_seleccionado]
 
-    # Si es Director de carrera, restringimos por su servicio exacto (normalizado)
+    # Si es Director de carrera, restringimos ya por su servicio exacto
     if carrera_norm:
         df_para_filtros = df_para_filtros[df_para_filtros["Servicio_norm"] == carrera_norm]
 
@@ -290,7 +287,7 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
         with col_f2:
             servicio_seleccionado = st.selectbox("Servicio", servicios_disponibles)
 
-    # Tipo de observación (si existe la columna)
+    # Filtro adicional opcional: tipo de observación (si existe la columna)
     tipo_obs_col = None
     if "Tipo de observación" in df_respuestas.columns:
         tipo_obs_col = "Tipo de observación"
@@ -307,18 +304,21 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
         tipo_seleccionado = "Todos los tipos"
 
     # --------------------------------------------------
-    # APLICAR FILTROS AL DATAFRAME BASE
+    # APLICAR FILTROS
     # --------------------------------------------------
     df_filtrado = df_respuestas.copy()
 
+    # Filtro por corte
     if corte_seleccionado != "Todos los cortes":
         df_filtrado = df_filtrado[df_filtrado["Corte"] == corte_seleccionado]
 
+    # Filtro por servicio
     if carrera_norm:
         df_filtrado = df_filtrado[df_filtrado["Servicio_norm"] == carrera_norm]
     elif servicio_seleccionado != "Todos los servicios":
         df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO] == servicio_seleccionado]
 
+    # Filtro por tipo de observación
     if tipo_seleccionado != "Todos los tipos" and tipo_obs_col:
         df_filtrado = df_filtrado[df_filtrado[tipo_obs_col] == tipo_seleccionado]
 
