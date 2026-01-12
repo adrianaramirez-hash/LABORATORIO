@@ -27,7 +27,9 @@ def cargar_datos_desde_sheets():
     """
     # Credenciales desde secrets (robusto: string JSON o dict)
     raw = st.secrets["gcp_service_account_json"]
-    creds_dict = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+ from collections.abc import Mapping
+creds_dict = dict(raw) if isinstance(raw, Mapping) else json.loads(raw)
+
 
     creds = Credentials.from_service_account_info(
         creds_dict,
