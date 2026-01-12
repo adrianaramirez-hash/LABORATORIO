@@ -97,6 +97,7 @@ CATALOGO_CARRERAS = [
     "Maestría: Entrenamiento Deportivo",
     "Maestría: Tecnología e Innovación Educativa",
     "Licenciatura Entrenamiento Deportivo",
+    "Centro de Idiomas",
 ]
 
 carrera = None
