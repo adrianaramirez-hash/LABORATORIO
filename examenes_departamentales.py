@@ -1,6 +1,7 @@
 # examenes_departamentales.py
 import json
 from typing import Tuple
+from collections.abc import Mapping
 
 import altair as alt
 import gspread
@@ -30,7 +31,22 @@ COLS_RESP_REQUIRED = ["Carrera", "Version", "Matricula", "Grupo", "Correo", "Ord
 @st.cache_data(ttl=300)
 def _get_gspread_client() -> gspread.Client:
     raw = st.secrets["gcp_service_account_json"]
-    creds_dict = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+
+    # Streamlit puede entregar dict, AttrDict (Mapping) o string JSON
+    if isinstance(raw, Mapping):
+        creds_dict = dict(raw)
+    elif isinstance(raw, (str, bytes, bytearray)):
+        creds_dict = json.loads(raw)
+    else:
+        # Último recurso: intentar convertir a dict, si no, error claro
+        try:
+            creds_dict = dict(raw)
+        except Exception as e:
+            raise TypeError(
+                f"Formato no soportado para gcp_service_account_json: {type(raw)}. "
+                "Debe ser Mapping (dict/AttrDict) o JSON string."
+            ) from e
+
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
@@ -42,8 +58,7 @@ def _load_worksheet_df(spreadsheet_url: str, worksheet_name: str) -> pd.DataFram
     ws = sh.worksheet(worksheet_name)
     data = ws.get_all_records()
     df = pd.DataFrame(data)
-    # normaliza columnas
-    df.columns = [str(c).strip() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]  # normaliza columnas
     return df
 
 
@@ -161,7 +176,6 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
     # -----------------------------
     st.subheader("Promedio por área")
 
-    # Puntos posibles por área
     area_pos = (
         base_v.groupby("Area", dropna=False, as_index=False)["Puntos"]
         .sum()
@@ -249,10 +263,8 @@ def render_examenes_departamentales(spreadsheet_url: str) -> None:
     # (Opcional) Tabla de alumnos: promedio individual
     # -----------------------------
     with st.expander("Detalle por alumno (promedio individual)"):
-        # puntos posibles por examen (según filtro carrera/version)
         puntos_pos = puntos_posibles if puntos_posibles else 0.0
 
-        # agrega por alumno
         by_alumno = (
             df.groupby(["Matricula", "Correo", "Grupo"], dropna=False, as_index=False)["Puntos_obtenidos"]
             .sum()
