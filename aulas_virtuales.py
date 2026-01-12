@@ -19,6 +19,45 @@ NUM_COLS = {
     "formato_alt": "formato_alternativo_num",
 }
 
+# ============================
+# Clasificación de textos (B)
+# Beneficios / Limitaciones / Mejoras
+# ============================
+
+TEXT_COLS = {
+    "beneficios": "En caso de considerarlo útil, ¿Qué beneficios principales identifica?",
+    "limitaciones": "En caso de considerarlo poco útil o nada útil, ¿Qué limitaciones o dificultades ha encontrado?",
+    "mejoras": "¿Qué mejoras sugiere para optimizar el uso de las Aulas Virtuales en la planeación docente?",
+}
+
+# Categorías y palabras clave (puedes ajustar con el tiempo)
+CATS_BENEFICIOS = {
+    "Organización y planeación": ["organiza", "orden", "planea", "planeación", "planear", "estructura", "control"],
+    "Seguimiento y evidencia": ["seguimiento", "evidencia", "registro", "bitácora", "bitacora", "historial", "control"],
+    "Acceso a materiales": ["material", "recursos", "documentos", "archivos", "disponible", "consultar"],
+    "Comunicación": ["comunicación", "comunicar", "avisos", "mensajes", "retro", "retroalimentación"],
+    "Apoyo al aprendizaje": ["aprendizaje", "aprenden", "refuerzo", "repaso", "autónomo", "autonomo", "mejora"],
+    "Ahorro de tiempo": ["tiempo", "agiliza", "rápido", "rapido", "automat", "eficiente"],
+}
+
+CATS_LIMITACIONES = {
+    "Falta de tiempo/carga de trabajo": ["tiempo", "carga", "satur", "mucho trabajo", "no me da", "no alcanza"],
+    "Problemas técnicos/plataforma": ["seac", "plataforma", "lento", "falla", "error", "cae", "no sirve", "problema técnico", "tecnico"],
+    "Falta de capacitación": ["capacitación", "capacitacion", "taller", "curso", "no sé", "no se", "desconozco"],
+    "Resistencia/hábito": ["no acostumbro", "costumbre", "resistencia", "prefer", "no me gusta", "no uso"],
+    "Acceso/conectividad": ["internet", "conexión", "conexion", "equipo", "computadora", "celular", "red"],
+    "Duplicidad de trabajo": ["doble", "duplic", "repet", "otra vez", "redund", "mismo"],
+}
+
+CATS_MEJORAS = {
+    "Capacitación y acompañamiento": ["capacitación", "capacitacion", "taller", "curso", "acompañamiento", "asesoría", "asesoria"],
+    "Simplificación/plantilla": ["plantilla", "formato", "simpl", "más fácil", "mas facil", "guiar", "estructura"],
+    "Mejoras de plataforma": ["seac", "plataforma", "lento", "mejorar", "error", "optim", "usabilidad", "interfaz"],
+    "Automatización": ["automat", "autollen", "auto", "integrar", "sincron", "importar"],
+    "Seguimiento/monitoreo": ["seguimiento", "supervisión", "supervision", "revisión", "revision", "control"],
+    "Comunicación y recordatorios": ["recordatorio", "avisos", "notificación", "notificacion", "alerta", "calendario"],
+}
+
 
 def _get_av_url() -> str:
     url = st.secrets.get("AV_URL", "").strip()
@@ -127,6 +166,67 @@ def _bar(df: pd.DataFrame, title: str):
             tooltip=["Nivel", "Conteo"],
         )
         .properties(height=280, title=title)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+# ============================
+# Text mining simple por diccionario
+# ============================
+def _norm_text(s: str) -> str:
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    return str(s).strip().lower()
+
+
+def _classify_text(s: str, cats: dict) -> str:
+    """
+    Devuelve la primera categoría cuyo set de keywords aparece en el texto.
+    Si no hay match: 'Otros / sin clasificar'
+    """
+    t = _norm_text(s)
+    if not t:
+        return ""
+    for cat, kws in cats.items():
+        for kw in kws:
+            if kw in t:
+                return cat
+    return "Otros / sin clasificar"
+
+
+def _top_categories(text_series: pd.Series, cats: dict, top_n: int = 6) -> pd.DataFrame:
+    """
+    Clasifica cada texto, cuenta categorías y devuelve top_n.
+    Excluye vacíos.
+    """
+    s = text_series.dropna().astype(str)
+    s = s[s.str.strip() != ""]
+    if s.empty:
+        return pd.DataFrame(columns=["Categoría", "Conteo"])
+
+    classified = s.apply(lambda x: _classify_text(x, cats))
+    classified = classified[classified != ""]
+    if classified.empty:
+        return pd.DataFrame(columns=["Categoría", "Conteo"])
+
+    vc = classified.value_counts().head(top_n).reset_index()
+    vc.columns = ["Categoría", "Conteo"]
+    return vc
+
+
+def _plot_cat_counts(df: pd.DataFrame, title: str):
+    if df is None or df.empty:
+        st.info("Sin comentarios para clasificar en este filtro.")
+        return
+    chart = (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("Categoría:N", sort="-x", title=None),
+            x=alt.X("Conteo:Q", title=None),
+            tooltip=["Categoría", "Conteo"],
+        )
+        .properties(height=max(260, 32 * len(df)), title=title)
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -281,10 +381,8 @@ def mostrar(vista: str, carrera: str | None = None):
         )
         servicios_disponibles = sorted(set([s for s in servicios_disponibles if s]))
 
-        # Opciones base: siempre incluir "(Todos)" para que DG vea resumen general
         opciones = ["(Todos)"]
 
-        # Si hay escuela_base, agregamos la opción de agrupar por escuela (solo si aplica)
         if escuela_base and str(escuela_base).strip().lower() not in ["nan", "none", ""]:
             servicios_escuela = (
                 cat[cat["escuela"] == escuela_base]["servicio_std"]
@@ -295,9 +393,6 @@ def mostrar(vista: str, carrera: str | None = None):
         else:
             opciones += servicios_disponibles
 
-        # Default:
-        # - Dirección General: "(Todos)"
-        # - Director: su carrera/servicio si está, si no "(Todos)"
         default_idx = 0
         if vista != "Dirección General" and servicio_base and servicio_base in opciones:
             default_idx = opciones.index(servicio_base)
@@ -480,10 +575,72 @@ def mostrar(vista: str, carrera: str | None = None):
         g3.metric("% Poco/Nada útil", f"{pn:.1f}%" if pn is not None else "—")
         g4.metric("% Quiere formato alternativo", f"{alt_si:.1f}%" if alt_si is not None else "—")
 
-        st.info(
-            "Siguiente mejora: clasificar Beneficios/Limitaciones/Mejoras por categorías para graficar hallazgos "
-            "sin depender de una tabla completa."
-        )
+        # ============================
+        # Texto: Beneficios / Limitaciones / Mejoras por categorías
+        # ============================
+        st.divider()
+        st.markdown("### Hallazgos cualitativos (clasificación por categorías)")
+
+        # Validar si existen columnas de texto
+        missing_text_cols = [v for v in TEXT_COLS.values() if v not in f.columns]
+        if missing_text_cols:
+            st.warning(
+                "No se encontraron algunas columnas de texto para clasificar. "
+                "Revisa encabezados en tu hoja:\n- " + "\n- ".join(missing_text_cols)
+            )
+        else:
+            cB, cL, cM = st.columns(3)
+
+            with cB:
+                st.markdown("**Beneficios (Top categorías)**")
+                top_b = _top_categories(f[TEXT_COLS["beneficios"]], CATS_BENEFICIOS, top_n=6)
+                _plot_cat_counts(top_b, "Beneficios")
+                if not top_b.empty:
+                    cat_sel_b = st.selectbox("Ver ejemplos (Beneficios)", ["(Ninguno)"] + top_b["Categoría"].tolist(), key="b_sel")
+                    if cat_sel_b != "(Ninguno)":
+                        ejemplos = (
+                            f[[TEXT_COLS["beneficios"]]]
+                            .dropna()
+                            .astype(str)
+                        )
+                        ejemplos = ejemplos[ejemplos[TEXT_COLS["beneficios"]].str.strip() != ""]
+                        ejemplos["cat"] = ejemplos[TEXT_COLS["beneficios"]].apply(lambda x: _classify_text(x, CATS_BENEFICIOS))
+                        ejemplos = ejemplos[ejemplos["cat"] == cat_sel_b].head(20)
+                        st.dataframe(ejemplos[[TEXT_COLS["beneficios"]]].rename(columns={TEXT_COLS["beneficios"]: "Ejemplos"}), use_container_width=True)
+
+            with cL:
+                st.markdown("**Limitaciones (Top categorías)**")
+                top_l = _top_categories(f[TEXT_COLS["limitaciones"]], CATS_LIMITACIONES, top_n=6)
+                _plot_cat_counts(top_l, "Limitaciones")
+                if not top_l.empty:
+                    cat_sel_l = st.selectbox("Ver ejemplos (Limitaciones)", ["(Ninguno)"] + top_l["Categoría"].tolist(), key="l_sel")
+                    if cat_sel_l != "(Ninguno)":
+                        ejemplos = (
+                            f[[TEXT_COLS["limitaciones"]]]
+                            .dropna()
+                            .astype(str)
+                        )
+                        ejemplos = ejemplos[ejemplos[TEXT_COLS["limitaciones"]].str.strip() != ""]
+                        ejemplos["cat"] = ejemplos[TEXT_COLS["limitaciones"]].apply(lambda x: _classify_text(x, CATS_LIMITACIONES))
+                        ejemplos = ejemplos[ejemplos["cat"] == cat_sel_l].head(20)
+                        st.dataframe(ejemplos[[TEXT_COLS["limitaciones"]]].rename(columns={TEXT_COLS["limitaciones"]: "Ejemplos"}), use_container_width=True)
+
+            with cM:
+                st.markdown("**Mejoras (Top categorías)**")
+                top_m = _top_categories(f[TEXT_COLS["mejoras"]], CATS_MEJORAS, top_n=6)
+                _plot_cat_counts(top_m, "Mejoras")
+                if not top_m.empty:
+                    cat_sel_m = st.selectbox("Ver ejemplos (Mejoras)", ["(Ninguno)"] + top_m["Categoría"].tolist(), key="m_sel")
+                    if cat_sel_m != "(Ninguno)":
+                        ejemplos = (
+                            f[[TEXT_COLS["mejoras"]]]
+                            .dropna()
+                            .astype(str)
+                        )
+                        ejemplos = ejemplos[ejemplos[TEXT_COLS["mejoras"]].str.strip() != ""]
+                        ejemplos["cat"] = ejemplos[TEXT_COLS["mejoras"]].apply(lambda x: _classify_text(x, CATS_MEJORAS))
+                        ejemplos = ejemplos[ejemplos["cat"] == cat_sel_m].head(20)
+                        st.dataframe(ejemplos[[TEXT_COLS["mejoras"]]].rename(columns={TEXT_COLS["mejoras"]: "Ejemplos"}), use_container_width=True)
 
         st.divider()
         st.markdown("### Sección IV. Formato alternativo")
