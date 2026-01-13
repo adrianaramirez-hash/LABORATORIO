@@ -10,6 +10,7 @@ import gspread
 
 SHEET_BASE = "BASE_CONSOLIDADA"
 SHEET_RESP = "RESPUESTAS_LARGAS"
+SHEET_CATALOGO = "CATALOGO_EXAMENES"  # NUEVO
 
 
 # ============================================================
@@ -55,7 +56,12 @@ def _load_from_gsheets_by_url(url):
 
     base = _ws_to_df(sh, SHEET_BASE)
     resp = _ws_to_df(sh, SHEET_RESP)
-    return base, resp
+
+    catalogo = pd.DataFrame()
+    if SHEET_CATALOGO in titles:
+        catalogo = _ws_to_df(sh, SHEET_CATALOGO)
+
+    return base, resp, catalogo
 
 
 def _as_str(df, col):
@@ -89,7 +95,6 @@ def _infer_year_from_version(version_value):
 # Normalización de texto / opción (para comparar respuestas texto vs A/B/C/D)
 # ============================================================
 def _norm_text(x):
-    """Normaliza texto para comparar (sin acentos, minúsculas, sin comillas raras)."""
     if x is None:
         return ""
     try:
@@ -110,11 +115,6 @@ def _norm_text(x):
 
 
 def _normalize_letter(x):
-    """
-    Detecta letra A/B/C/D si viene como:
-    A, a, A), A., "Opcion A", etc.
-    O también 1-4 -> A-D
-    """
     if x is None:
         return None
     try:
@@ -142,11 +142,6 @@ def _normalize_letter(x):
 
 
 def _best_match_letter(resp_text, optA, optB, optC, optD, threshold=0.86):
-    """
-    Infere A/B/C/D comparando texto respondido vs textos de opciones.
-    1) Igualdad exacta por texto normalizado
-    2) Si no, similitud (SequenceMatcher) con umbral
-    """
     r = _norm_text(resp_text)
     if not r:
         return None
@@ -158,12 +153,10 @@ def _best_match_letter(resp_text, optA, optB, optC, optD, threshold=0.86):
         "D": _norm_text(optD),
     }
 
-    # 1) Igualdad exacta normalizada
     for k, v in opts.items():
         if v and r == v:
             return k
 
-    # 2) Similitud
     best_k = None
     best_score = 0.0
     for k, v in opts.items():
@@ -178,10 +171,10 @@ def _best_match_letter(resp_text, optA, optB, optC, optD, threshold=0.86):
 
 
 # ============================================================
-# Normalización para resolver carrera (selector vs datos)
+# Catálogo: resolver nombre bonito -> carrera canónica
 # ============================================================
-def _norm_key(s):
-    """Normaliza una carrera para comparar (minúsculas, sin acentos, espacios estándar)."""
+def _clean_key(s):
+    """Clave comparable (sin acentos, minúsculas, espacios normalizados)."""
     if s is None:
         return ""
     try:
@@ -198,43 +191,72 @@ def _norm_key(s):
     return s.strip()
 
 
-def _resolve_carrera_choice(carrera_input, carreras_disponibles, threshold=0.78):
+def _catalogo_build_maps(catalogo: pd.DataFrame):
     """
-    Regresa la carrera EXACTA tal como aparece en los datos,
-    a partir del texto del selector (carrera_input).
-    - 1) Match por normalización exacta
-    - 2) Si no, match por similitud
+    Regresa:
+      - map_display_to_canon[(display_key, version_key)] = canon_value
+      - map_canon_to_display[(canon_key, version_key)] = display_value
     """
-    if not carrera_input:
+    if catalogo is None or catalogo.empty:
+        return {}, {}
+
+    # Validación mínima
+    needed = {"Carrera", "Version"}
+    if not needed.issubset(set(catalogo.columns)):
+        return {}, {}
+
+    cat = catalogo.copy()
+    for c in ["Carrera", "Version"]:
+        cat[c] = cat[c].astype(str).str.strip()
+
+    # Preferimos "Notas (opcional)" como display, si existe. Si no existe, usamos Carrera.
+    display_col = "Notas (opcional)" if "Notas (opcional)" in cat.columns else None
+    if display_col:
+        cat[display_col] = cat[display_col].astype(str).str.strip()
+        cat.loc[cat[display_col].isin(["", "nan", "NaN"]), display_col] = pd.NA
+
+    map_display_to_canon = {}
+    map_canon_to_display = {}
+
+    for _, r in cat.iterrows():
+        canon = str(r.get("Carrera", "")).strip()
+        ver = str(r.get("Version", "")).strip()
+
+        if not canon or canon.lower() == "nan" or not ver or ver.lower() == "nan":
+            continue
+
+        display = canon
+        if display_col and pd.notna(r.get(display_col)):
+            display = str(r.get(display_col)).strip()
+
+        dk = _clean_key(display)
+        ck = _clean_key(canon)
+        vk = _clean_key(ver)
+
+        if dk and vk:
+            map_display_to_canon[(dk, vk)] = canon
+
+        if ck and vk:
+            # guarda el display (bonito) para DG
+            map_canon_to_display[(ck, vk)] = display
+
+    return map_display_to_canon, map_canon_to_display
+
+
+def _resolve_canon_from_display(display_value, version_value, map_display_to_canon):
+    if not display_value or not version_value:
         return None
+    dk = _clean_key(display_value)
+    vk = _clean_key(version_value)
+    return map_display_to_canon.get((dk, vk))
 
-    target = _norm_key(carrera_input)
-    if not target:
-        return None
 
-    # 1) exacto normalizado
-    norm_map = {}
-    for c in carreras_disponibles:
-        nk = _norm_key(c)
-        if nk and nk not in norm_map:
-            norm_map[nk] = c
-
-    if target in norm_map:
-        return norm_map[target]
-
-    # 2) similitud
-    best_c = None
-    best_score = 0.0
-    for c in carreras_disponibles:
-        score = SequenceMatcher(None, target, _norm_key(c)).ratio()
-        if score > best_score:
-            best_score = score
-            best_c = c
-
-    if best_score >= threshold:
-        return best_c
-
-    return None
+def _display_from_canon(canon_value, version_value, map_canon_to_display):
+    if not canon_value or not version_value:
+        return canon_value
+    ck = _clean_key(canon_value)
+    vk = _clean_key(version_value)
+    return map_canon_to_display.get((ck, vk), canon_value)
 
 
 # ============================================================
@@ -268,7 +290,6 @@ def _prepare(base, resp):
     if not required_resp.issubset(set(resp.columns)):
         raise ValueError(f"RESPUESTAS_LARGAS debe contener: {sorted(required_resp)}")
 
-    # Opciones esperadas en base
     option_cols = [c for c in ["A", "B", "C", "D"] if c in base.columns]
     if len(option_cols) < 4:
         raise ValueError(
@@ -288,7 +309,6 @@ def _prepare(base, resp):
     base = base.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
     base["Clave_letter"] = base["Clave"].apply(_normalize_letter)
 
-    # AlumnoID (solo agregación)
     resp["AlumnoID"] = resp["Matricula"].where(
         resp["Matricula"].notna()
         & (resp["Matricula"] != "")
@@ -296,7 +316,6 @@ def _prepare(base, resp):
         resp["Correo"],
     ).astype(str).str.strip()
 
-    # Merge (incluye opciones)
     keep_cols = [
         "Carrera",
         "Version",
@@ -312,12 +331,7 @@ def _prepare(base, resp):
     ]
     df = resp.merge(base[keep_cols], on=["Carrera", "Version", "ID_reactivo"], how="left")
 
-    # Match base
     df["Match_base"] = df["Clave_letter"].notna()
-
-    # Respuesta del alumno:
-    # 1) intenta leer como letra directa
-    # 2) si no, mapea por texto contra opciones A-D
     df["Resp_letter_direct"] = df["Respuesta_alumno"].apply(_normalize_letter)
     df["Resp_letter_text"] = df.apply(
         lambda r: _best_match_letter(
@@ -326,11 +340,8 @@ def _prepare(base, resp):
         axis=1,
     )
     df["Resp_letter"] = df["Resp_letter_direct"].fillna(df["Resp_letter_text"])
-
-    # Cobertura: si se pudo identificar una opción válida
     df["Respondida_valida"] = df["Resp_letter"].notna().astype(int)
 
-    # Acierto
     df["Acierto"] = (
         (df["Match_base"])
         & (df["Resp_letter"].notna())
@@ -340,7 +351,6 @@ def _prepare(base, resp):
 
     df["Puntos_obtenidos"] = df["Acierto"].astype(float) * df["Puntos"].fillna(0).astype(float)
 
-    # Puntos posibles por examen (Carrera+Version)
     puntos_posibles_cv = (
         base.groupby(["Carrera", "Version"], as_index=False)["Puntos"]
         .sum()
@@ -348,7 +358,6 @@ def _prepare(base, resp):
     )
     df = df.merge(puntos_posibles_cv, on=["Carrera", "Version"], how="left")
 
-    # Reactivos del examen (conteo) por Carrera+Version
     n_reactivos_cv = (
         base.groupby(["Carrera", "Version"], as_index=False)["ID_reactivo"]
         .nunique()
@@ -356,7 +365,6 @@ def _prepare(base, resp):
     )
     df = df.merge(n_reactivos_cv, on=["Carrera", "Version"], how="left")
 
-    # Por alumno
     by_alumno = (
         df.groupby(["AlumnoID", "Carrera", "Version"], as_index=False)
         .agg(
@@ -367,7 +375,6 @@ def _prepare(base, resp):
         )
     )
 
-    # Score clásico (castiga omisiones)
     by_alumno["Score"] = by_alumno.apply(
         lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"])
         if pd.notna(r["Puntos_posibles_examen"]) and float(r["Puntos_posibles_examen"]) > 0
@@ -377,8 +384,6 @@ def _prepare(base, resp):
 
     by_alumno["Promedio_0_10"] = pd.to_numeric(by_alumno["Score"], errors="coerce") * 10.0
     by_alumno["Porcentaje_0_100"] = pd.to_numeric(by_alumno["Score"], errors="coerce") * 100.0
-
-    # Cobertura
     by_alumno["Cobertura"] = (
         by_alumno.apply(
             lambda r: (r["Respondidas_validas"] / r["Reactivos_examen"])
@@ -410,7 +415,6 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
     cov_pct = float(pd.to_numeric(ba_f["Cobertura"], errors="coerce").mean())
     n_respondieron = int(ba_f["AlumnoID"].nunique())
 
-    # Área (promedio 0–10)
     area_pos = (
         base_f.groupby("Area", as_index=False)["Puntos"]
         .sum()
@@ -434,7 +438,6 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
         .sort_values("Promedio_area", ascending=False)
     )
 
-    # Materia (promedio 0–10)
     mat_pos = (
         base_f.groupby("Materia", as_index=False)["Puntos"]
         .sum()
@@ -465,20 +468,21 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
 # Render
 # ============================================================
 def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
-    # Normaliza vista para decidir correctamente
     vista_norm = (vista or "").strip().lower()
-    es_direccion_general = vista_norm in ["dirección general".lower(), "direccion general"]
+    es_direccion_general = vista_norm in ["direccion general", "dirección general"]
 
     st.info("Examen departamental: **Piloto**. Resultados con fines de diagnóstico y mejora continua.")
 
     try:
         with st.spinner("Cargando datos (Google Sheets)…"):
-            base, resp = _load_from_gsheets_by_url(spreadsheet_url)
+            base, resp, catalogo = _load_from_gsheets_by_url(spreadsheet_url)
             base, resp, df, by_alumno = _prepare(base, resp)
     except Exception as e:
         st.error("No se pudieron cargar/procesar las hojas (BASE_CONSOLIDADA / RESPUESTAS_LARGAS).")
         st.exception(e)
         return
+
+    map_display_to_canon, map_canon_to_display = _catalogo_build_maps(catalogo)
 
     # Aplicación (año)
     date_col = _pick_date_col(resp)
@@ -493,12 +497,9 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
 
     st.caption(f"Aplicación: **{year_aplicacion if year_aplicacion else '—'}**")
 
-    versiones = sorted(
-        [v for v in base["Version"].dropna().unique().tolist() if v and str(v).lower() != "nan"]
-    )
+    versiones = sorted([v for v in base["Version"].dropna().unique().tolist() if v and str(v).lower() != "nan"])
     sel_version = st.selectbox("Aplicación / Versión", ["Todas"] + versiones, index=0)
 
-    # Filtrar por versión
     base_v = base.copy()
     df_v = df.copy()
     ba_v = by_alumno.copy()
@@ -508,38 +509,39 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
         ba_v = ba_v[ba_v["Version"] == sel_version].copy()
 
     # ========================================================
-    # Director de carrera (NO debe ver DG)
+    # Director de carrera (usa catálogo: Notas -> Carrera canónica)
     # ========================================================
     if not es_direccion_general:
-        carrera_input = (carrera or "").strip()
-        if not carrera_input:
+        display_input = (carrera or "").strip()
+        if not display_input:
             st.warning("No recibí la carrera desde app.py. En vista Director de carrera es obligatoria.")
             return
 
-        carreras_data = sorted(
-            [c for c in ba_v["Carrera"].dropna().unique().tolist() if c and str(c).lower() != "nan"]
-        )
-
-        carrera_resuelta = _resolve_carrera_choice(carrera_input, carreras_data)
-
-        if not carrera_resuelta:
-            st.error("No encontré esa carrera en los datos del examen para la aplicación/versión seleccionada.")
-            st.caption(f"Carrera seleccionada en la app: **{carrera_input}**")
-            if carreras_data:
-                st.caption("Carreras disponibles en los datos (muestra):")
-                st.write(carreras_data[:30])
-            else:
-                st.caption("No hay carreras disponibles en los datos con la versión seleccionada.")
+        # Si eligió "Todas", no aplica para director, pero lo manejamos:
+        if sel_version == "Todas":
+            st.warning("En vista Director de carrera, selecciona una Aplicación / Versión específica.")
             return
 
+        carrera_canon = _resolve_canon_from_display(display_input, sel_version, map_display_to_canon)
+
+        # Fallback: si no hay catálogo o no coincide, intenta directo con el valor que venga
+        if not carrera_canon:
+            carrera_canon = display_input
+
         prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(
-            df_v, base_v, ba_v, carrera_resuelta, sel_version
+            df_v, base_v, ba_v, carrera_canon, sel_version
         )
 
+        if prom_0_10 is None:
+            st.error("No encontré datos para esa carrera en la versión seleccionada.")
+            st.caption(f"Carrera seleccionada (menú): **{display_input}**")
+            st.caption(f"Carrera usada para filtrar (canónica): **{carrera_canon}**")
+            return
+
         c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
-        c1.metric("Promedio (0–10)", f"{prom_0_10:.2f}" if prom_0_10 is not None else "—")
-        c2.metric("Porcentaje de acierto", f"{prom_pct:.1f}%" if prom_pct is not None else "—")
-        c3.metric("Cobertura (respondidas)", f"{cov_pct:.1f}%" if cov_pct is not None else "—")
+        c1.metric("Promedio (0–10)", f"{prom_0_10:.2f}")
+        c2.metric("Porcentaje de acierto", f"{prom_pct:.1f}%")
+        c3.metric("Cobertura (respondidas)", f"{cov_pct:.1f}%")
         c4.metric("Alumnos que respondieron", f"{n_al:,}")
 
         st.divider()
@@ -589,26 +591,48 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
             .sort_values("Porcentaje", ascending=False)
         )
 
-        st.markdown("### Resultados por carrera")
-        st.dataframe(resumen, use_container_width=True, hide_index=True)
+        # Poner nombre “bonito” si existe catálogo (por versión)
+        if sel_version != "Todas":
+            resumen["Carrera (display)"] = resumen["Carrera"].apply(
+                lambda c: _display_from_canon(c, sel_version, map_canon_to_display)
+            )
+        else:
+            resumen["Carrera (display)"] = resumen["Carrera"]
 
-        ch = _bar_h(resumen, "Carrera", "Porcentaje", "Porcentaje de acierto (0–100)")
+        st.markdown("### Resultados por carrera")
+        st.dataframe(
+            resumen[["Carrera (display)", "Promedio_0_10", "Porcentaje", "Cobertura", "Alumnos"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        ch = _bar_h(resumen.rename(columns={"Carrera (display)": "Carrera"}), "Carrera", "Porcentaje", "Porcentaje de acierto (0–100)")
         if ch is not None:
             st.altair_chart(ch, use_container_width=True)
         return
 
     # DG: detalle por carrera
-    carreras = sorted(
-        [c for c in ba_v["Carrera"].dropna().unique().tolist() if c and str(c).lower() != "nan"]
-    )
-    if not carreras:
+    if sel_version == "Todas":
+        st.warning("Para ver detalle por carrera, selecciona una Aplicación / Versión específica.")
+        return
+
+    carreras_canon = sorted([c for c in ba_v["Carrera"].dropna().unique().tolist() if c and str(c).lower() != "nan"])
+    if not carreras_canon:
         st.warning("No hay carreras con datos para la versión seleccionada.")
         return
 
-    sel_carrera = st.selectbox("Selecciona la carrera", carreras, index=0)
+    # Mostrar selector con nombres “bonitos” si hay catálogo
+    opciones_display = [
+        _display_from_canon(c, sel_version, map_canon_to_display) for c in carreras_canon
+    ]
+    # Evitar duplicados display (por si el catálogo repite)
+    # Si duplica, se verá igual, pero resolvemos al canon por índice.
+    sel_display = st.selectbox("Selecciona la carrera", opciones_display, index=0)
+    idx = opciones_display.index(sel_display)
+    sel_carrera_canon = carreras_canon[idx]
 
     prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(
-        df_v, base_v, ba_v, sel_carrera, sel_version
+        df_v, base_v, ba_v, sel_carrera_canon, sel_version
     )
 
     c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
