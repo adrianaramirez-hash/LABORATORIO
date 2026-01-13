@@ -12,7 +12,6 @@ st.set_page_config(page_title="Dirección Académica", layout="wide")
 
 # ============================================================
 # “Guard rails” para que NUNCA se quede en blanco
-# (si hay error, lo muestra en pantalla)
 # ============================================================
 st.title("Dirección Académica")
 st.caption("Seguimiento del Plan Anual.")
@@ -104,6 +103,11 @@ CATALOGO_CARRERAS = [
     "Centro de Idiomas",
 ]
 
+# ============================================================
+# Selección / asignación de carrera
+# - Hoy se simula con un selectbox.
+# - Mañana (con control de acceso) aquí se asignará automáticamente.
+# ============================================================
 carrera = None
 try:
     if vista == "Director de carrera":
@@ -157,8 +161,13 @@ try:
 
     elif seccion == "Exámenes departamentales":
         st.subheader("Exámenes departamentales")
+
+        # CLAVE: pasar vista y carrera para que el módulo sepa
+        # si debe mostrar DG o Director, y qué carrera fijar.
         render_examenes_departamentales(
-            "https://docs.google.com/spreadsheets/d/1GqlE9SOkSNCdA9mi65hk45uuLAao8GHHoresiyhRfQU/edit"
+            "https://docs.google.com/spreadsheets/d/1GqlE9SOkSNCdA9mi65hk45uuLAao8GHHoresiyhRfQU/edit",
+            vista=vista,
+            carrera=carrera,
         )
 
     elif seccion == "Aulas virtuales":
