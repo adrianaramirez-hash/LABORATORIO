@@ -6,10 +6,10 @@ import observacion_clases
 import aulas_virtuales
 from examenes_departamentales import render_examenes_departamentales
 
-# --- NUEVO: dependencias para leer ACCESOS desde Google Sheets ---
 import pandas as pd
 import gspread
 import json
+import re
 from google.oauth2.service_account import Credentials
 
 # ============================================================
@@ -17,42 +17,97 @@ from google.oauth2.service_account import Credentials
 # ============================================================
 st.set_page_config(page_title="Dirección Académica", layout="wide")
 
-# ============================================================
-# Debug (estética limpia por defecto)
-# - Cambia a True solo cuando necesites diagnosticar secrets/errores.
-# ============================================================
+# Cambia a True si quieres ver excepciones completas
 DEBUG = False
 
 # ============================================================
-# URL (fijo) del Google Sheet donde está la pestaña ACCESOS
+# ACCESOS: Sheet donde está la pestaña ACCESOS (tu URL)
 # ============================================================
-ACCESOS_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CK7nphUH9YS2JqSWRhrgamYoQdgJCsn5tERA-WnwXes/edit"
+ACCESOS_SHEET_URL = "https://docs.google.com/spreadsheets/d/1CK7nphUH9YS2JqSWRhrgamYoQdgJCsn5tERA-WnwXes/edit?gid=770892546#gid=770892546"
+ACCESOS_GID = 770892546
+ACCESOS_TAB_NAME = "ACCESOS"
 
-# ============================================================
-# Scopes (lectura)
-# ============================================================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
 # ============================================================
-# Helpers: leer ACCESOS
+# Helpers
 # ============================================================
+def _extract_sheet_id(url: str) -> str:
+    m = re.search(r"/d/([a-zA-Z0-9-_]+)", url or "")
+    if not m:
+        raise ValueError("No pude extraer el ID del Google Sheet desde la URL.")
+    return m.group(1)
+
+def _first_nonempty_row_index(values: list[list[str]]) -> int:
+    for i, row in enumerate(values):
+        if any(str(c).strip() for c in row):
+            return i
+    return 0
+
 @st.cache_data(ttl=120, show_spinner=False)
-def cargar_accesos_df() -> pd.DataFrame:
+def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
+    """
+    Devuelve:
+      df_accesos (solo activos, email normalizado)
+      service_account_email (para debug/permisos)
+    """
     raw = st.secrets["gcp_service_account_json"]
     creds_dict = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+    sa_email = creds_dict.get("client_email", "")
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
 
-    sh = client.open_by_url(ACCESOS_SHEET_URL)
-    ws = sh.worksheet("ACCESOS")
-    df = pd.DataFrame(ws.get_all_records())
+    sheet_id = _extract_sheet_id(ACCESOS_SHEET_URL)
+    sh = client.open_by_key(sheet_id)
 
-    # Normalización defensiva
+    # 1) Intentar por nombre
+    ws = None
+    try:
+        ws = sh.worksheet(ACCESOS_TAB_NAME)
+    except Exception:
+        ws = None
+
+    # 2) Si no existe por nombre, intentar por GID
+    if ws is None:
+        try:
+            ws = sh.get_worksheet_by_id(ACCESOS_GID)
+        except Exception:
+            ws = None
+
+    # 3) Fallback final
+    if ws is None:
+        ws = sh.sheet1
+
+    values = ws.get_all_values()
+    if not values or len(values) < 1:
+        return pd.DataFrame(columns=["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO"]), sa_email
+
+    header_idx = _first_nonempty_row_index(values)
+    header = [str(c).strip() for c in values[header_idx]]
+    data = values[header_idx + 1 :]
+
+    # Ajuste: si header viene corto, expandir al máximo de columnas detectadas
+    max_cols = max(len(header), max((len(r) for r in data), default=len(header)))
+    header = header + [""] * (max_cols - len(header))
+    header = [h if h else f"COL_{i+1}" for i, h in enumerate(header)]
+
+    # Normalizar filas a mismo número de columnas
+    norm_data = []
+    for r in data:
+        r = [str(c) for c in r]
+        r = r + [""] * (max_cols - len(r))
+        norm_data.append(r[:max_cols])
+
+    df = pd.DataFrame(norm_data, columns=header)
+
+    # Normalización de columnas clave (tolerante a mayúsculas/minúsculas)
     df.columns = [str(c).strip().upper() for c in df.columns]
+
+    # Asegurar columnas esperadas
     for col in ["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO"]:
         if col not in df.columns:
             df[col] = ""
@@ -61,25 +116,16 @@ def cargar_accesos_df() -> pd.DataFrame:
     df["ROL"] = df["ROL"].astype(str).str.strip().str.upper()
     df["SERVICIO_ASIGNADO"] = df["SERVICIO_ASIGNADO"].astype(str).str.strip()
 
-    # ACTIVO a boolean robusto
     activo_raw = df["ACTIVO"].astype(str).str.strip().str.upper()
     df["ACTIVO"] = activo_raw.isin(["TRUE", "1", "SI", "SÍ", "YES", "ACTIVO"])
 
-    # Filtra solo activos y emails válidos
-    df = df[df["ACTIVO"] & (df["EMAIL"] != "")]
-    return df
+    # Limpiar filas vacías y dejar solo activos
+    df = df[df["EMAIL"] != ""]
+    df = df[df["ACTIVO"]]
 
+    return df, sa_email
 
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
-    """
-    Retorna dict:
-      {
-        "ok": bool,
-        "rol": "DG"|"DC",
-        "servicio": str|None,
-        "mensaje": str
-      }
-    """
     email_norm = (email or "").strip().lower()
     if not email_norm:
         return {"ok": False, "rol": None, "servicio": None, "mensaje": "Captura tu correo."}
@@ -90,33 +136,22 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
             "ok": False,
             "rol": None,
             "servicio": None,
-            "mensaje": "Acceso no encontrado. Verifica tu correo o solicita alta en ACCESOS.",
+            "mensaje": "Acceso no encontrado o inactivo. Verifica tu correo en ACCESOS.",
         }
 
     rol = str(fila.iloc[0]["ROL"]).strip().upper()
     servicio = str(fila.iloc[0]["SERVICIO_ASIGNADO"]).strip()
 
     if rol not in ["DG", "DC"]:
-        return {
-            "ok": False,
-            "rol": None,
-            "servicio": None,
-            "mensaje": "ROL inválido en ACCESOS. Usa DG o DC.",
-        }
+        return {"ok": False, "rol": None, "servicio": None, "mensaje": "ROL inválido en ACCESOS. Usa DG o DC."}
 
     if rol == "DC" and not servicio:
-        return {
-            "ok": False,
-            "rol": None,
-            "servicio": None,
-            "mensaje": "Falta SERVICIO_ASIGNADO para este usuario (ROL=DC).",
-        }
+        return {"ok": False, "rol": None, "servicio": None, "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
 
     return {"ok": True, "rol": rol, "servicio": (servicio if rol == "DC" else None), "mensaje": "OK"}
 
-
 # ============================================================
-# Header (logo + título)  ✅ solo escudo + Dirección Académica
+# Header (logo + título)
 # ============================================================
 logo_url = "udl_logo.png"
 try:
@@ -134,68 +169,64 @@ except Exception as e:
 st.divider()
 
 # ============================================================
-# Diagnóstico de secrets (oculto en producción)
+# LOGIN / ACCESO (AHORA EN EL CUERPO, NO EN SIDEBAR)
 # ============================================================
-if DEBUG:
-    try:
-        secretos_disponibles = list(st.secrets.keys())
-        st.info(
-            f"Secrets detectados: {', '.join(secretos_disponibles) if secretos_disponibles else '(ninguno)'}"
-        )
-    except Exception as e:
-        st.error("No fue posible leer st.secrets.")
-        st.exception(e)
+login_box = st.container()
 
-# ============================================================
-# LOGIN / ACCESO (NUEVO)
-# ============================================================
-with st.sidebar:
+with login_box:
     st.subheader("Acceso")
-    email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
-    colA, colB = st.columns(2)
-    with colA:
-        entrar = st.button("Entrar", use_container_width=True)
-    with colB:
-        salir = st.button("Salir", use_container_width=True)
 
-if salir:
-    for k in ["user_email", "user_rol", "user_servicio"]:
-        st.session_state.pop(k, None)
-    st.rerun()
+    # Si ya hay sesión, mostrar estado y botón salir
+    if "user_rol" in st.session_state:
+        c1, c2 = st.columns([4, 1], vertical_alignment="center")
+        with c1:
+            st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
+        with c2:
+            if st.button("Salir", use_container_width=True):
+                for k in ["user_email", "user_rol", "user_servicio"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+    else:
+        email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
+        if st.button("Entrar", use_container_width=True):
+            try:
+                df_accesos, sa_email = cargar_accesos_df()
+                res = resolver_permiso_por_email(email_input, df_accesos)
 
-# Si no hay sesión, intentar iniciar con botón
-if entrar:
-    try:
-        df_accesos = cargar_accesos_df()
-        res = resolver_permiso_por_email(email_input, df_accesos)
+                if not res["ok"]:
+                    st.error(res["mensaje"])
+                    st.stop()
 
-        if not res["ok"]:
-            st.error(res["mensaje"])
-            st.stop()
+                st.session_state["user_email"] = (email_input or "").strip().lower()
+                st.session_state["user_rol"] = res["rol"]           # DG / DC
+                st.session_state["user_servicio"] = res["servicio"] # None si DG
+                st.rerun()
 
-        st.session_state["user_email"] = (email_input or "").strip().lower()
-        st.session_state["user_rol"] = res["rol"]           # DG / DC
-        st.session_state["user_servicio"] = res["servicio"] # None si DG
-        st.rerun()
+            except Exception as e:
+                # Mensaje claro + datos accionables (service account)
+                st.error("No fue posible validar el acceso. Revisa permisos del Google Sheet de ACCESOS.")
+                try:
+                    raw = st.secrets["gcp_service_account_json"]
+                    creds_dict = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+                    sa_email = creds_dict.get("client_email", "")
+                except Exception:
+                    sa_email = ""
 
-    except Exception as e:
-        st.error("No fue posible validar el acceso. Revisa credenciales/permisos del Sheet de ACCESOS.")
-        if DEBUG:
-            st.exception(e)
-        st.stop()
+                if sa_email:
+                    st.info(f"Comparte el Sheet de ACCESOS con este correo (Viewer): {sa_email}")
 
-# Si sigue sin sesión, detener
+                if DEBUG:
+                    st.exception(e)
+                else:
+                    with st.expander("Ver detalle técnico (para diagnóstico)"):
+                        st.write(str(e))
+                st.stop()
+
+# Si no hay sesión, detener aquí (para que no cargue módulos)
 if "user_rol" not in st.session_state:
-    st.info("Ingresa tu correo institucional y da clic en Entrar.")
     st.stop()
 
-# ============================================================
-# Vista/carrera AUTOMÁTICAS por rol (NUEVO)
-# - DG: puede ver Todo y elegir servicio
-# - DC: solo su servicio; no se permite cambiar
-# ============================================================
-ROL = st.session_state["user_rol"]
-SERVICIO_DC = st.session_state.get("user_servicio")
+st.divider()
 
 # ============================================================
 # Catálogo de carreras
@@ -245,11 +276,13 @@ CATALOGO_CARRERAS = [
     "Centro de Idiomas",
 ]
 
-# Mapea rol → vista que ya usan los módulos
-if ROL == "DG":
-    vista = "Dirección General"
-else:
-    vista = "Director de carrera"
+# ============================================================
+# Vista/carrera AUTOMÁTICAS por rol
+# ============================================================
+ROL = st.session_state["user_rol"]
+SERVICIO_DC = st.session_state.get("user_servicio")
+
+vista = "Dirección General" if ROL == "DG" else "Director de carrera"
 
 # Selector de servicio: DG sí; DC no
 carrera = None
@@ -296,7 +329,7 @@ except Exception as e:
 st.divider()
 
 # ============================================================
-# Router (con manejo de errores visible)
+# Router
 # ============================================================
 try:
     if seccion == "Encuesta de calidad":
