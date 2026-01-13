@@ -168,6 +168,7 @@ if entrar:
     try:
         df_accesos = cargar_accesos_df()
         res = resolver_permiso_por_email(email_input, df_accesos)
+
         if not res["ok"]:
             st.error(res["mensaje"])
             st.stop()
@@ -176,6 +177,12 @@ if entrar:
         st.session_state["user_rol"] = res["rol"]           # DG / DC
         st.session_state["user_servicio"] = res["servicio"] # None si DG
         st.rerun()
+
+    except Exception as e:
+        st.error("No fue posible validar el acceso. Revisa credenciales/permisos del Sheet de ACCESOS.")
+        if DEBUG:
+            st.exception(e)
+        st.stop()
 
 # Si sigue sin sesión, detener
 if "user_rol" not in st.session_state:
