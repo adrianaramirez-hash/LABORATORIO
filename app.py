@@ -13,8 +13,7 @@ st.set_page_config(page_title="Dirección Académica", layout="wide")
 # ============================================================
 # “Guard rails” para que NUNCA se quede en blanco
 # ============================================================
-st.title("Dirección Académica")
-st.caption("Seguimiento del Plan Anual.")
+# NOTA: Quitamos st.title/st.caption aquí para que NO se repita el encabezado.
 st.divider()
 
 # Muestra rápidamente si faltan secrets (sin exponer valores)
@@ -28,15 +27,16 @@ except Exception as e:
     st.exception(e)
 
 # ============================================================
-# Header (logo + título)
+# Header (logo + título)  ✅ solo escudo + Dirección Académica
 # ============================================================
 logo_url = "udl_logo.png"
 try:
-    col1, col2 = st.columns([1, 4])
+    col1, col2 = st.columns([1, 5], vertical_alignment="center")
     with col1:
-        st.image(logo_url, use_container_width=True)
+        st.image(logo_url, width=140)  # ajusta aquí el tamaño del escudo (120–170 recomendado)
     with col2:
-        st.subheader("Panel principal")
+        st.markdown("# Dirección Académica")
+        st.caption("Seguimiento del Plan Anual.")
 except Exception as e:
     st.warning("No se pudo cargar el logo (esto no detiene la app).")
     st.exception(e)
@@ -162,8 +162,6 @@ try:
     elif seccion == "Exámenes departamentales":
         st.subheader("Exámenes departamentales")
 
-        # CLAVE: pasar vista y carrera para que el módulo sepa
-        # si debe mostrar DG o Director, y qué carrera fijar.
         render_examenes_departamentales(
             "https://docs.google.com/spreadsheets/d/1GqlE9SOkSNCdA9mi65hk45uuLAao8GHHoresiyhRfQU/edit",
             vista=vista,
