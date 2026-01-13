@@ -11,20 +11,10 @@ from examenes_departamentales import render_examenes_departamentales
 st.set_page_config(page_title="Dirección Académica", layout="wide")
 
 # ============================================================
-# “Guard rails” para que NUNCA se quede en blanco
+# Debug (estética limpia por defecto)
+# - Cambia a True solo cuando necesites diagnosticar secrets/errores.
 # ============================================================
-# NOTA: Quitamos st.title/st.caption aquí para que NO se repita el encabezado.
-st.divider()
-
-# Muestra rápidamente si faltan secrets (sin exponer valores)
-try:
-    secretos_disponibles = list(st.secrets.keys())
-    st.info(
-        f"Secrets detectados: {', '.join(secretos_disponibles) if secretos_disponibles else '(ninguno)'}"
-    )
-except Exception as e:
-    st.error("No fue posible leer st.secrets.")
-    st.exception(e)
+DEBUG = False
 
 # ============================================================
 # Header (logo + título)  ✅ solo escudo + Dirección Académica
@@ -33,15 +23,29 @@ logo_url = "udl_logo.png"
 try:
     col1, col2 = st.columns([1, 5], vertical_alignment="center")
     with col1:
-        st.image(logo_url, width=140)  # ajusta aquí el tamaño del escudo (120–170 recomendado)
+        st.image(logo_url, width=140)  # ajusta tamaño del escudo (120–170 recomendado)
     with col2:
         st.markdown("# Dirección Académica")
         st.caption("Seguimiento del Plan Anual.")
 except Exception as e:
     st.warning("No se pudo cargar el logo (esto no detiene la app).")
-    st.exception(e)
+    if DEBUG:
+        st.exception(e)
 
 st.divider()
+
+# ============================================================
+# Diagnóstico de secrets (oculto en producción)
+# ============================================================
+if DEBUG:
+    try:
+        secretos_disponibles = list(st.secrets.keys())
+        st.info(
+            f"Secrets detectados: {', '.join(secretos_disponibles) if secretos_disponibles else '(ninguno)'}"
+        )
+    except Exception as e:
+        st.error("No fue posible leer st.secrets.")
+        st.exception(e)
 
 # ============================================================
 # Selector de vista
@@ -53,7 +57,8 @@ try:
     )
 except Exception as e:
     st.error("Error creando selector de vista.")
-    st.exception(e)
+    if DEBUG:
+        st.exception(e)
     st.stop()
 
 # ============================================================
@@ -105,8 +110,6 @@ CATALOGO_CARRERAS = [
 
 # ============================================================
 # Selección / asignación de carrera
-# - Hoy se simula con un selectbox.
-# - Mañana (con control de acceso) aquí se asignará automáticamente.
 # ============================================================
 carrera = None
 try:
@@ -114,7 +117,8 @@ try:
         carrera = st.selectbox("Selecciona la carrera:", CATALOGO_CARRERAS)
 except Exception as e:
     st.error("Error creando selector de carrera.")
-    st.exception(e)
+    if DEBUG:
+        st.exception(e)
     st.stop()
 
 st.divider()
@@ -139,7 +143,8 @@ try:
     )
 except Exception as e:
     st.error("Error creando selector de apartado.")
-    st.exception(e)
+    if DEBUG:
+        st.exception(e)
     st.stop()
 
 st.divider()
@@ -161,7 +166,6 @@ try:
 
     elif seccion == "Exámenes departamentales":
         st.subheader("Exámenes departamentales")
-
         render_examenes_departamentales(
             "https://docs.google.com/spreadsheets/d/1GqlE9SOkSNCdA9mi65hk45uuLAao8GHHoresiyhRfQU/edit",
             vista=vista,
@@ -187,5 +191,6 @@ try:
 
 except Exception as e:
     st.error("Ocurrió un error al cargar el apartado seleccionado.")
-    st.exception(e)
+    if DEBUG:
+        st.exception(e)
     st.stop()
