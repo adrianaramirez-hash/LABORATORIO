@@ -60,6 +60,18 @@ def _load_creds_dict() -> dict:
         return json.loads(raw)
     return dict(raw)
 
+def _placeholder_en_construccion(titulo: str):
+    """
+    Placeholder uniforme para módulos aún no implementados.
+    """
+    st.subheader(titulo)
+    st.warning("📝 En construcción")
+    st.caption(
+        "Este módulo se habilitará próximamente. "
+        "Mientras tanto, puedes consultar los apartados ya disponibles: "
+        "Encuesta de calidad, Observación de clases, Exámenes departamentales y Aulas virtuales."
+    )
+
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     """
@@ -342,7 +354,19 @@ try:
         observacion_clases.render_observacion_clases(vista=vista, carrera=carrera)
 
     elif seccion == "Evaluación docente":
-        st.info("Módulo en construcción: Evaluación docente")
+        _placeholder_en_construccion("Evaluación docente")
+
+    elif seccion == "Capacitaciones":
+        _placeholder_en_construccion("Capacitaciones")
+
+    elif seccion == "Índice de reprobación":
+        _placeholder_en_construccion("Índice de reprobación")
+
+    elif seccion == "Titulación":
+        _placeholder_en_construccion("Titulación")
+
+    elif seccion == "Ceneval":
+        _placeholder_en_construccion("Ceneval")
 
     elif seccion == "Exámenes departamentales":
         st.subheader("Exámenes departamentales")
