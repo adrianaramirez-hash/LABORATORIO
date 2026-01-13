@@ -1,4 +1,5 @@
 # examenes_departamentales.py
+import re
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -12,10 +13,6 @@ SHEET_RESP = "RESPUESTAS_LARGAS"
 # Helpers
 # ============================================================
 def _dedupe_headers(headers: list[str]) -> list[str]:
-    """
-    Si hay encabezados duplicados (ej. 'Orden' repetido), los vuelve únicos:
-    Orden, Orden__2, Orden__3...
-    """
     seen = {}
     out = []
     for h in headers:
@@ -34,24 +31,22 @@ def _ws_to_df(sh, ws_title: str) -> pd.DataFrame:
     values = ws.get_all_values()
     if not values:
         return pd.DataFrame()
-
     headers = _dedupe_headers([h.strip() for h in values[0]])
     rows = values[1:]
-    df = pd.DataFrame(rows, columns=headers).replace("", pd.NA)
-    return df
+    return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
 
 
 @st.cache_data(show_spinner=False, ttl=300)
 def _load_from_gsheets_by_url(url: str):
-    # MISMA LÓGICA que encuesta_calidad.py
     sa = dict(st.secrets["gcp_service_account_json"])
     gc = gspread.service_account_from_dict(sa)
     sh = gc.open_by_url(url)
 
     titles = [ws.title for ws in sh.worksheets()]
-    if SHEET_BASE not in titles or SHEET_RESP not in titles:
+    missing = [s for s in [SHEET_BASE, SHEET_RESP] if s not in titles]
+    if missing:
         raise ValueError(
-            f"No encontré pestañas requeridas: {SHEET_BASE} y/o {SHEET_RESP}. "
+            f"No encontré pestañas requeridas: {', '.join(missing)}. "
             f"Pestañas disponibles: {', '.join(titles)}"
         )
 
@@ -68,64 +63,62 @@ def _as_upper(df: pd.DataFrame, col: str) -> pd.Series:
     return df[col].astype(str).str.strip().str.upper()
 
 
-def _bar(df: pd.DataFrame, cat: str, val: str, title_cat: str, title_val: str):
+def _pick_date_col(df: pd.DataFrame) -> str | None:
+    candidates = [
+        "Fecha", "fecha",
+        "Marca temporal", "Marca Temporal",
+        "Timestamp", "timestamp",
+        "Aplicación", "Aplicacion",
+    ]
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _infer_year_from_version(version_value: str) -> int | None:
+    if not version_value:
+        return None
+    m = re.search(r"(20\d{2})", str(version_value))
+    return int(m.group(1)) if m else None
+
+
+def _nice_pct(x: float) -> str:
+    try:
+        return f"{x:.1%}"
+    except Exception:
+        return "—"
+
+
+def _bar_h(df: pd.DataFrame, cat: str, val: str, title: str):
     if df is None or df.empty:
         return None
+    # Limitamos altura para que no se “infinitezca” si hay muchas filas
+    height = min(900, max(280, len(df) * 26))
     return (
         alt.Chart(df)
         .mark_bar()
         .encode(
-            y=alt.Y(f"{cat}:N", sort="-x", title=title_cat),
-            x=alt.X(f"{val}:Q", title=title_val),
-            tooltip=[cat, alt.Tooltip(val, format=".1%")],
+            y=alt.Y(f"{cat}:N", sort="-x", title=None),
+            x=alt.X(f"{val}:Q", title=title),
+            tooltip=[alt.Tooltip(cat, title=cat), alt.Tooltip(val, title=title, format=".1%")],
         )
-        .properties(height=max(260, len(df) * 28))
+        .properties(height=height)
     )
 
 
 # ============================================================
-# Render principal (compatible con tu app.py actual)
+# Core cálculos (sin alumnos individuales)
 # ============================================================
-def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = None, carrera: str | None = None):
-    st.subheader("Exámenes departamentales")
-
-    # ---------------------------
-    # Carga
-    # ---------------------------
-    try:
-        with st.spinner("Cargando datos (Google Sheets)…"):
-            base, resp = _load_from_gsheets_by_url(spreadsheet_url)
-    except Exception as e:
-        st.error("No se pudieron cargar las hojas requeridas (BASE_CONSOLIDADA / RESPUESTAS_LARGAS).")
-        st.exception(e)
-        return
-
-    if base.empty:
-        st.warning("La hoja BASE_CONSOLIDADA está vacía.")
-        return
-    if resp.empty:
-        st.warning("La hoja RESPUESTAS_LARGAS está vacía.")
-        return
-
-    # ---------------------------
-    # Validación mínima de columnas
-    # ---------------------------
+def _prepare(base: pd.DataFrame, resp: pd.DataFrame):
     required_base = {"Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"}
     required_resp = {"Carrera", "Version", "ID_reactivo", "Matricula", "Grupo", "Correo", "Respuesta_alumno"}
 
     if not required_base.issubset(set(base.columns)):
-        st.error(f"BASE_CONSOLIDADA debe contener: {sorted(required_base)}")
-        st.caption(f"Columnas detectadas: {list(base.columns)}")
-        return
-
+        raise ValueError(f"BASE_CONSOLIDADA debe contener: {sorted(required_base)}")
     if not required_resp.issubset(set(resp.columns)):
-        st.error(f"RESPUESTAS_LARGAS debe contener: {sorted(required_resp)}")
-        st.caption(f"Columnas detectadas: {list(resp.columns)}")
-        return
+        raise ValueError(f"RESPUESTAS_LARGAS debe contener: {sorted(required_resp)}")
 
-    # ---------------------------
-    # Normalización
-    # ---------------------------
     base = base.copy()
     resp = resp.copy()
 
@@ -139,136 +132,287 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
 
     base["Puntos"] = pd.to_numeric(base["Puntos"], errors="coerce").fillna(1.0)
 
-    # Evitar duplicados en base por llave (por si quedó repetido)
+    # Evitar duplicados por llave
     base = base.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
 
-    # ---------------------------
-    # Filtros (vista/carrera)
-    # ---------------------------
-    if not vista:
-        vista = "Dirección General"
+    # AlumnoID (no mostramos detalle; solo sirve para agregar)
+    resp["AlumnoID"] = resp["Matricula"].where(
+        resp["Matricula"].notna() & (resp["Matricula"] != "") & (resp["Matricula"].str.lower() != "nan"),
+        resp["Correo"],
+    ).astype(str).str.strip()
 
-    carreras = sorted([c for c in base["Carrera"].dropna().unique().tolist() if c and c.lower() != "nan"])
-
-    if vista == "Dirección General":
-        sel_carrera = st.selectbox("Servicio/Carrera", ["Todos"] + carreras, index=0)
-    else:
-        # Director de carrera: fija carrera si viene desde app.py
-        sel_carrera = (carrera or "").strip()
-        st.text_input("Carrera (fija por vista)", value=sel_carrera, disabled=True)
-        if not sel_carrera:
-            st.warning("No recibí carrera en esta vista. Selecciona 'Dirección General' o pasa carrera desde app.py.")
-            return
-
-    if sel_carrera != "Todos":
-        base_f = base[base["Carrera"] == sel_carrera].copy()
-        resp_f = resp[resp["Carrera"] == sel_carrera].copy()
-    else:
-        base_f = base.copy()
-        resp_f = resp.copy()
-
-    versiones = sorted([v for v in base_f["Version"].dropna().unique().tolist() if v and v.lower() != "nan"])
-    sel_version = st.selectbox("Versión", ["Todas"] + versiones, index=0)
-
-    if sel_version != "Todas":
-        base_f = base_f[base_f["Version"] == sel_version].copy()
-        resp_f = resp_f[resp_f["Version"] == sel_version].copy()
-
-    st.caption(f"Registros base: **{len(base_f)}** | Respuestas: **{len(resp_f)}**")
-
-    if base_f.empty or resp_f.empty:
-        st.warning("No hay datos para los filtros seleccionados.")
-        return
-
-    # ---------------------------
     # Merge
-    # ---------------------------
-    df = resp_f.merge(
-        base_f[["Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"]],
+    df = resp.merge(
+        base[["Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"]],
         on=["Carrera", "Version", "ID_reactivo"],
         how="left",
     )
 
-    # Diagnóstico de match
-    total = len(df)
-    sin_match = int(df["Clave"].isna().sum())
-    if sin_match > 0:
-        st.warning(f"Respuestas sin match con base: **{sin_match:,}** de **{total:,}**. (Revisar ID_reactivo/Carrera/Version)")
-
-    # ---------------------------
-    # Cálculo correcto de promedios (por alumno)
-    # ---------------------------
-    # ID de alumno: usa matrícula; si no hay, usa correo
-    df["AlumnoID"] = df["Matricula"].where(df["Matricula"].notna() & (df["Matricula"] != "nan") & (df["Matricula"] != ""), df["Correo"])
-    df["AlumnoID"] = df["AlumnoID"].astype(str).str.strip()
-
+    # Aciertos y puntos
     df["Acierto"] = (df["Respuesta_alumno"] == df["Clave"]).astype("Int64")
     df["Puntos_obtenidos"] = df["Acierto"].fillna(0).astype(float) * df["Puntos"].fillna(0).astype(float)
 
-    # Puntos posibles por examen (según filtros)
-    puntos_posibles_total = float(base_f["Puntos"].sum()) if len(base_f) else 0.0
-
-    # Score por alumno
-    by_alumno = (
-        df.groupby(["AlumnoID"], as_index=False)["Puntos_obtenidos"]
+    # Puntos posibles por carrera+version (para score por alumno)
+    puntos_posibles_cv = (
+        base.groupby(["Carrera", "Version"], as_index=False)["Puntos"]
         .sum()
-        .rename(columns={"Puntos_obtenidos": "Puntos_obtenidos"})
+        .rename(columns={"Puntos": "Puntos_posibles_examen"})
     )
-    by_alumno["Score"] = by_alumno["Puntos_obtenidos"] / puntos_posibles_total if puntos_posibles_total else 0.0
-    promedio_general = float(by_alumno["Score"].mean()) if len(by_alumno) else 0.0
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Promedio general (promedio de alumnos)", f"{promedio_general:.1%}")
-    c2.metric("Alumnos", f"{len(by_alumno):,}")
-    c3.metric("Puntos posibles (examen)", f"{puntos_posibles_total:,.0f}")
+    df = df.merge(puntos_posibles_cv, on=["Carrera", "Version"], how="left")
 
-    st.divider()
+    return base, resp, df
 
-    # ---------------------------
-    # Promedio por Área (promedio de alumnos por área)
-    # ---------------------------
-    st.markdown("### Promedio por área")
 
-    area_pos = base_f.groupby("Area", as_index=False)["Puntos"].sum().rename(columns={"Puntos": "Puntos_posibles"})
-    # puntos obtenidos por alumno-área
-    area_alumno = df.groupby(["AlumnoID", "Area"], as_index=False)["Puntos_obtenidos"].sum()
-    area_alumno = area_alumno.merge(area_pos, on="Area", how="left")
-    area_alumno["Score_area"] = area_alumno["Puntos_obtenidos"] / area_alumno["Puntos_posibles"]
+def _promedio_institucional(df: pd.DataFrame) -> tuple[float, int]:
+    """
+    Promedio institucional = promedio de scores de alumnos (cada alumno normalizado por puntos posibles de su examen).
+    Regresa (promedio, n_alumnos)
+    """
+    if df.empty:
+        return 0.0, 0
 
-    area_res = area_alumno.groupby("Area", as_index=False)["Score_area"].mean().rename(columns={"Score_area": "Promedio_area"})
-    area_res = area_res.sort_values("Promedio_area", ascending=False)
+    # total por alumno + carrera+version
+    by_alumno = (
+        df.groupby(["AlumnoID", "Carrera", "Version"], as_index=False)
+        .agg(Puntos_obtenidos=("Puntos_obtenidos", "sum"),
+             Puntos_posibles_examen=("Puntos_posibles_examen", "first"))
+    )
+    by_alumno["Score"] = by_alumno.apply(
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"]) if r["Puntos_posibles_examen"] else 0.0,
+        axis=1,
+    )
+    return float(by_alumno["Score"].mean()) if len(by_alumno) else 0.0, int(len(by_alumno))
 
-    st.dataframe(area_res, use_container_width=True, hide_index=True)
 
-    ch = _bar(area_res, "Area", "Promedio_area", "Área", "Promedio")
-    if ch is not None:
-        st.altair_chart(ch, use_container_width=True)
+def _resumen_por_carrera(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tabla: carrera, promedio (promedio de alumnos), alumnos_respondieron
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["Carrera", "Promedio_general", "Alumnos"])
 
-    st.divider()
+    by_alumno = (
+        df.groupby(["AlumnoID", "Carrera", "Version"], as_index=False)
+        .agg(Puntos_obtenidos=("Puntos_obtenidos", "sum"),
+             Puntos_posibles_examen=("Puntos_posibles_examen", "first"))
+    )
+    by_alumno["Score"] = by_alumno.apply(
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"]) if r["Puntos_posibles_examen"] else 0.0,
+        axis=1,
+    )
 
-    # ---------------------------
-    # Promedio por Materia (promedio de alumnos por materia)
-    # ---------------------------
-    st.markdown("### Promedio por materia")
+    out = (
+        by_alumno.groupby("Carrera", as_index=False)
+        .agg(Promedio_general=("Score", "mean"),
+             Alumnos=("AlumnoID", "nunique"))
+        .sort_values("Promedio_general", ascending=False)
+    )
+    return out
 
-    mat_pos = base_f.groupby("Materia", as_index=False)["Puntos"].sum().rename(columns={"Puntos": "Puntos_posibles"})
-    mat_alumno = df.groupby(["AlumnoID", "Materia"], as_index=False)["Puntos_obtenidos"].sum()
-    mat_alumno = mat_alumno.merge(mat_pos, on="Materia", how="left")
-    mat_alumno["Score_materia"] = mat_alumno["Puntos_obtenidos"] / mat_alumno["Puntos_posibles"]
 
-    mat_res = mat_alumno.groupby("Materia", as_index=False)["Score_materia"].mean().rename(columns={"Score_materia": "Promedio_materia"})
-    mat_res = mat_res.sort_values("Promedio_materia", ascending=False)
+def _detalle_carrera(df: pd.DataFrame, base: pd.DataFrame, carrera: str, version: str | None):
+    """
+    Devuelve: promedio_carrera, alumnos, area_df, materia_df
+    (sin listar alumnos)
+    """
+    base_f = base[base["Carrera"] == carrera].copy()
+    df_f = df[df["Carrera"] == carrera].copy()
 
-    st.dataframe(mat_res, use_container_width=True, hide_index=True)
+    if version and version != "Todas":
+        base_f = base_f[base_f["Version"] == version].copy()
+        df_f = df_f[df_f["Version"] == version].copy()
 
-    ch2 = _bar(mat_res, "Materia", "Promedio_materia", "Materia", "Promedio")
-    if ch2 is not None:
-        st.altair_chart(ch2, use_container_width=True)
+    if base_f.empty or df_f.empty:
+        return 0.0, 0, pd.DataFrame(), pd.DataFrame()
 
-    # ---------------------------
-    # Detalle opcional
-    # ---------------------------
-    with st.expander("Detalle por alumno"):
-        show = by_alumno.copy()
-        show = show.sort_values("Score", ascending=False)
+    # Promedio general carrera (promedio de alumnos)
+    by_alumno = (
+        df_f.groupby(["AlumnoID", "Version"], as_index=False)
+        .agg(Puntos_obtenidos=("Puntos_obtenidos", "sum"),
+             Puntos_posibles_examen=("Puntos_posibles_examen", "first"))
+    )
+    by_alumno["Score"] = by_alumno.apply(
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"]) if r["Puntos_posibles_examen"] else 0.0,
+        axis=1,
+    )
+    prom_carrera = float(by_alumno["Score"].mean()) if len(by_alumno) else 0.0
+    n_alumnos = int(by_alumno["AlumnoID"].nunique())
+
+    # Área: score por alumno-área (normalizado por puntos posibles de área)
+    area_pos = (
+        base_f.groupby("Area", as_index=False)["Puntos"]
+        .sum()
+        .rename(columns={"Puntos": "Puntos_posibles_area"})
+    )
+    area_al = (
+        df_f.groupby(["AlumnoID", "Area"], as_index=False)["Puntos_obtenidos"]
+        .sum()
+        .merge(area_pos, on="Area", how="left")
+    )
+    area_al["Score_area"] = area_al.apply(
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_area"]) if r["Puntos_posibles_area"] else 0.0,
+        axis=1,
+    )
+    area_df = (
+        area_al.groupby("Area", as_index=False)["Score_area"]
+        .mean()
+        .rename(columns={"Score_area": "Promedio_area"})
+        .sort_values("Promedio_area", ascending=False)
+    )
+
+    # Materia: score por alumno-materia
+    mat_pos = (
+        base_f.groupby("Materia", as_index=False)["Puntos"]
+        .sum()
+        .rename(columns={"Puntos": "Puntos_posibles_materia"})
+    )
+    mat_al = (
+        df_f.groupby(["AlumnoID", "Materia"], as_index=False)["Puntos_obtenidos"]
+        .sum()
+        .merge(mat_pos, on="Materia", how="left")
+    )
+    mat_al["Score_materia"] = mat_al.apply(
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_materia"]) if r["Puntos_posibles_materia"] else 0.0,
+        axis=1,
+    )
+    materia_df = (
+        mat_al.groupby("Materia", as_index=False)["Score_materia"]
+        .mean()
+        .rename(columns={"Score_materia": "Promedio_materia"})
+        .sort_values("Promedio_materia", ascending=False)
+    )
+
+    return prom_carrera, n_alumnos, area_df, materia_df
+
+
+# ============================================================
+# Render principal
+# ============================================================
+def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = None, carrera: str | None = None):
+    if not vista:
+        vista = "Dirección General"
+
+    # Mensaje piloto (siempre arriba)
+    st.info("Examen departamental: **Piloto**. Los resultados se presentan con fines de diagnóstico y mejora continua.")
+
+    # Carga
+    try:
+        with st.spinner("Cargando datos (Google Sheets)…"):
+            base, resp = _load_from_gsheets_by_url(spreadsheet_url)
+            base, resp, df = _prepare(base, resp)
+    except Exception as e:
+        st.error("No se pudieron cargar/procesar las hojas requeridas (BASE_CONSOLIDADA / RESPUESTAS_LARGAS).")
+        st.exception(e)
+        return
+
+    # Año de aplicación
+    date_col = _pick_date_col(resp)
+    year_aplicacion = None
+    if date_col:
+        # Intento de parseo flexible
+        dt = pd.to_datetime(resp[date_col], errors="coerce", dayfirst=True)
+        if dt.notna().any():
+            year_aplicacion = int(dt.dropna().dt.year.mode().iloc[0])
+    if year_aplicacion is None:
+        # fallback: intentar inferir de Version
+        sample_version = None
+        if "Version" in base.columns and base["Version"].notna().any():
+            sample_version = str(base["Version"].dropna().iloc[0])
+        year_aplicacion = _infer_year_from_version(sample_version) if sample_version else None
+
+    st.caption(f"Aplicación: **{year_aplicacion if year_aplicacion else '—'}**")
+
+    # Version selector (para proyección multianual)
+    versiones = sorted([v for v in base["Version"].dropna().unique().tolist() if v and str(v).lower() != "nan"])
+    sel_version = st.selectbox("Aplicación / Versión", ["Todas"] + versiones, index=0)
+
+    # Filtrar por versión
+    base_v = base.copy()
+    df_v = df.copy()
+    if sel_version != "Todas":
+        base_v = base_v[base_v["Version"] == sel_version].copy()
+        df_v = df_v[df_v["Version"] == sel_version].copy()
+
+    # =========================
+    # Vista Dirección General
+    # =========================
+    if vista == "Dirección General":
+        prom_inst, n_alumnos_inst = _promedio_institucional(df_v)
+        resumen = _resumen_por_carrera(df_v)
+
+        c1, c2, c3 = st.columns([1.2, 1.0, 1.0])
+        c1.metric("Promedio general institucional", _nice_pct(prom_inst))
+        c2.metric("Alumnos que respondieron", f"{n_alumnos_inst:,}")
+        c3.metric("Carreras con datos", f"{len(resumen):,}")
+
+        st.divider()
+        st.markdown("### Promedio general por carrera")
+
+        # Tabla (sin alumnos individuales; solo conteo)
+        show = resumen.copy()
+        show["Promedio_general"] = show["Promedio_general"].astype(float)
         st.dataframe(show, use_container_width=True, hide_index=True)
+
+        ch = _bar_h(show, "Carrera", "Promedio_general", "Promedio general")
+        if ch is not None:
+            st.altair_chart(ch, use_container_width=True)
+
+        st.divider()
+        st.markdown("### Ver detalle por carrera (igual a Director de carrera)")
+
+        carrera_opts = resumen["Carrera"].dropna().astype(str).tolist()
+        sel_carrera_detalle = st.selectbox("Selecciona una carrera para ver detalle", ["(Selecciona)"] + carrera_opts, index=0)
+
+        if sel_carrera_detalle != "(Selecciona)":
+            prom_c, n_al, area_df, materia_df = _detalle_carrera(df_v, base_v, sel_carrera_detalle, sel_version)
+
+            c1, c2 = st.columns([1.2, 1.0])
+            c1.metric("Promedio general (carrera)", _nice_pct(prom_c))
+            c2.metric("Alumnos que respondieron", f"{n_al:,}")
+
+            st.divider()
+            st.markdown("#### Promedio por área")
+            st.dataframe(area_df, use_container_width=True, hide_index=True)
+            ch_a = _bar_h(area_df, "Area", "Promedio_area", "Promedio por área")
+            if ch_a is not None:
+                st.altair_chart(ch_a, use_container_width=True)
+
+            st.divider()
+            st.markdown("#### Promedio por materia")
+            st.dataframe(materia_df, use_container_width=True, hide_index=True)
+            ch_m = _bar_h(materia_df, "Materia", "Promedio_materia", "Promedio por materia")
+            if ch_m is not None:
+                st.altair_chart(ch_m, use_container_width=True)
+
+        return
+
+    # =========================
+    # Vista Director de carrera
+    # =========================
+    # Director: NO menciona alumnos individualmente, solo conteo de respuestas
+    carrera_fija = (carrera or "").strip()
+    st.caption(f"Carrera (vista Director): **{carrera_fija if carrera_fija else '—'}**")
+    if not carrera_fija:
+        st.warning("No recibí la carrera desde app.py. Pasa el parámetro carrera en esta vista.")
+        return
+
+    prom_c, n_al, area_df, materia_df = _detalle_carrera(df_v, base_v, carrera_fija, sel_version)
+
+    c1, c2 = st.columns([1.2, 1.0])
+    c1.metric("Promedio general (carrera)", _nice_pct(prom_c))
+    c2.metric("Alumnos que respondieron", f"{n_al:,}")
+
+    st.divider()
+    st.markdown("### Promedio por área")
+    st.dataframe(area_df, use_container_width=True, hide_index=True)
+    ch_a = _bar_h(area_df, "Area", "Promedio_area", "Promedio por área")
+    if ch_a is not None:
+        st.altair_chart(ch_a, use_container_width=True)
+
+    st.divider()
+    st.markdown("### Promedio por materia")
+    st.dataframe(materia_df, use_container_width=True, hide_index=True)
+    ch_m = _bar_h(materia_df, "Materia", "Promedio_materia", "Promedio por materia")
+    if ch_m is not None:
+        st.altair_chart(ch_m, use_container_width=True)
