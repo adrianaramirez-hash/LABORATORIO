@@ -11,9 +11,6 @@ SHEET_BASE = "BASE_CONSOLIDADA"
 SHEET_RESP = "RESPUESTAS_LARGAS"
 
 
-# ============================================================
-# Helpers de carga
-# ============================================================
 def _dedupe_headers(headers):
     seen = {}
     out = []
@@ -75,11 +72,7 @@ def _infer_year_from_version(version_value):
     return int(m.group(1)) if m else None
 
 
-# ============================================================
-# Normalización de texto / opción
-# ============================================================
 def _norm_text(x):
-    """Normaliza texto para comparar (sin acentos, minúsculas, sin puntuación extra)."""
     if x is None:
         return ""
     try:
@@ -95,16 +88,11 @@ def _norm_text(x):
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"[“”\"'’`]", "", s)
-    s = re.sub(r"[^\w\s\.\,\-\(\)\:\;\/]", "", s)  # deja algo de puntuación suave
+    s = re.sub(r"[^\w\s\.\,\-\(\)\:\;\/]", "", s)
     return s.strip()
 
 
 def _normalize_letter(x):
-    """
-    Detecta letra A/B/C/D si viene como:
-    A, a, A), A., "Opcion A", etc.
-    O también 1-4 -> A-D
-    """
     if x is None:
         return None
     try:
@@ -132,11 +120,6 @@ def _normalize_letter(x):
 
 
 def _best_match_letter(resp_text, optA, optB, optC, optD, threshold=0.86):
-    """
-    Intenta inferir A/B/C/D comparando el texto respondido contra los textos de opciones.
-    1) Match exacto por texto normalizado
-    2) Si no, match por similitud (SequenceMatcher) con umbral
-    """
     r = _norm_text(resp_text)
     if not r:
         return None
@@ -148,12 +131,10 @@ def _best_match_letter(resp_text, optA, optB, optC, optD, threshold=0.86):
         "D": _norm_text(optD),
     }
 
-    # 1) Igualdad exacta normalizada
     for k, v in opts.items():
         if v and r == v:
             return k
 
-    # 2) Similitud
     best_k = None
     best_score = 0.0
     for k, v in opts.items():
@@ -183,9 +164,6 @@ def _bar_h(df, cat, val, title):
     )
 
 
-# ============================================================
-# Core
-# ============================================================
 def _prepare(base, resp):
     required_base = {"Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"}
     required_resp = {"Carrera", "Version", "ID_reactivo", "Matricula", "Grupo", "Correo", "Respuesta_alumno"}
@@ -195,7 +173,6 @@ def _prepare(base, resp):
     if not required_resp.issubset(set(resp.columns)):
         raise ValueError(f"RESPUESTAS_LARGAS debe contener: {sorted(required_resp)}")
 
-    # Opciones esperadas en base
     option_cols = [c for c in ["A", "B", "C", "D"] if c in base.columns]
     if len(option_cols) < 4:
         raise ValueError(
@@ -213,37 +190,25 @@ def _prepare(base, resp):
 
     base["Puntos"] = pd.to_numeric(base["Puntos"], errors="coerce").fillna(1.0)
     base = base.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
-
-    # Clave correcta (letra)
     base["Clave_letter"] = base["Clave"].apply(_normalize_letter)
 
-    # AlumnoID (solo agregación)
     resp["AlumnoID"] = resp["Matricula"].where(
         resp["Matricula"].notna() & (resp["Matricula"] != "") & (resp["Matricula"].str.lower() != "nan"),
         resp["Correo"],
     ).astype(str).str.strip()
 
-    # Merge (incluye opciones)
     keep_cols = ["Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave_letter", "Puntos", "A", "B", "C", "D"]
     df = resp.merge(base[keep_cols], on=["Carrera", "Version", "ID_reactivo"], how="left")
 
-    # Match base
     df["Match_base"] = df["Clave_letter"].notna()
-
-    # Respuesta del alumno: primero intenta leer como letra; si no, mapea por texto vs opciones A-D
     df["Resp_letter_direct"] = df["Respuesta_alumno"].apply(_normalize_letter)
-
     df["Resp_letter_text"] = df.apply(
         lambda r: _best_match_letter(r.get("Respuesta_alumno"), r.get("A"), r.get("B"), r.get("C"), r.get("D")),
         axis=1,
     )
-
     df["Resp_letter"] = df["Resp_letter_direct"].fillna(df["Resp_letter_text"])
-
-    # Cobertura: si se pudo identificar una opción (letra)
     df["Respondida_valida"] = df["Resp_letter"].notna().astype(int)
 
-    # Acierto
     df["Acierto"] = (
         (df["Match_base"])
         & (df["Resp_letter"].notna())
@@ -253,7 +218,6 @@ def _prepare(base, resp):
 
     df["Puntos_obtenidos"] = df["Acierto"].astype(float) * df["Puntos"].fillna(0).astype(float)
 
-    # Puntos posibles por examen (Carrera+Version)
     puntos_posibles_cv = (
         base.groupby(["Carrera", "Version"], as_index=False)["Puntos"]
         .sum()
@@ -261,7 +225,6 @@ def _prepare(base, resp):
     )
     df = df.merge(puntos_posibles_cv, on=["Carrera", "Version"], how="left")
 
-    # Reactivos del examen (conteo) por Carrera+Version
     n_reactivos_cv = (
         base.groupby(["Carrera", "Version"], as_index=False)["ID_reactivo"]
         .nunique()
@@ -269,7 +232,6 @@ def _prepare(base, resp):
     )
     df = df.merge(n_reactivos_cv, on=["Carrera", "Version"], how="left")
 
-    # Por alumno
     by_alumno = (
         df.groupby(["AlumnoID", "Carrera", "Version"], as_index=False)
         .agg(
@@ -280,7 +242,6 @@ def _prepare(base, resp):
         )
     )
 
-    # Score clásico (castiga omisiones)
     by_alumno["Score"] = by_alumno.apply(
         lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"])
         if pd.notna(r["Puntos_posibles_examen"]) and float(r["Puntos_posibles_examen"]) > 0
@@ -290,8 +251,6 @@ def _prepare(base, resp):
 
     by_alumno["Promedio_0_10"] = pd.to_numeric(by_alumno["Score"], errors="coerce") * 10.0
     by_alumno["Porcentaje_0_100"] = pd.to_numeric(by_alumno["Score"], errors="coerce") * 100.0
-
-    # Cobertura
     by_alumno["Cobertura"] = by_alumno.apply(
         lambda r: (r["Respondidas_validas"] / r["Reactivos_examen"])
         if pd.notna(r["Reactivos_examen"]) and float(r["Reactivos_examen"]) > 0
@@ -320,7 +279,6 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
     cov_pct = float(pd.to_numeric(ba_f["Cobertura"], errors="coerce").mean())
     n_respondieron = int(ba_f["AlumnoID"].nunique())
 
-    # Área (promedios 0–10)
     area_pos = (
         base_f.groupby("Area", as_index=False)["Puntos"]
         .sum()
@@ -344,7 +302,6 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
         .sort_values("Promedio_area", ascending=False)
     )
 
-    # Materia (promedios 0–10)
     mat_pos = (
         base_f.groupby("Materia", as_index=False)["Puntos"]
         .sum()
@@ -372,11 +329,12 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
 
 
 # ============================================================
-# Render
+# Render (CORREGIDO: Director NO debe ver DG)
 # ============================================================
 def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
-    if not vista:
-        vista = "Dirección General"
+    # Normaliza vista para decidir correctamente
+    vista_norm = (vista or "").strip().lower()
+    es_direccion_general = vista_norm == "dirección general".lower() or vista_norm == "direccion general"
 
     st.info("Examen departamental: **Piloto**. Resultados con fines de diagnóstico y mejora continua.")
 
@@ -414,53 +372,18 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
         df_v = df_v[df_v["Version"] == sel_version].copy()
         ba_v = ba_v[ba_v["Version"] == sel_version].copy()
 
-    # Métrica institucional
-    prom_inst_0_10 = float(pd.to_numeric(ba_v["Promedio_0_10"], errors="coerce").mean()) if not ba_v.empty else 0.0
-    prom_inst_pct = float(pd.to_numeric(ba_v["Porcentaje_0_100"], errors="coerce").mean()) if not ba_v.empty else 0.0
-    cov_inst_pct = float(pd.to_numeric(ba_v["Cobertura"], errors="coerce").mean()) if not ba_v.empty else 0.0
-    n_resp = int(ba_v["AlumnoID"].nunique()) if not ba_v.empty else 0
-
-    if vista == "Dirección General":
-        modo = st.radio("Vista", ["Institución (Resumen)", "Por carrera (Detalle)"], horizontal=True, index=0)
-        st.divider()
-
-        if modo == "Institución (Resumen)":
-            c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
-            c1.metric("Promedio (0–10)", f"{prom_inst_0_10:.2f}")
-            c2.metric("Porcentaje de acierto", f"{prom_inst_pct:.1f}%")
-            c3.metric("Cobertura (respondidas)", f"{cov_inst_pct:.1f}%")
-            c4.metric("Alumnos que respondieron", f"{n_resp:,}")
-
-            st.divider()
-
-            resumen = (
-                ba_v.groupby("Carrera", as_index=False)
-                .agg(
-                    Promedio_0_10=("Promedio_0_10", "mean"),
-                    Porcentaje=("Porcentaje_0_100", "mean"),
-                    Cobertura=("Cobertura", "mean"),
-                    Alumnos=("AlumnoID", "nunique"),
-                )
-                .sort_values("Porcentaje", ascending=False)
-            )
-
-            st.markdown("### Resultados por carrera")
-            st.dataframe(resumen, use_container_width=True, hide_index=True)
-
-            ch = _bar_h(resumen, "Carrera", "Porcentaje", "Porcentaje de acierto (0–100)")
-            if ch is not None:
-                st.altair_chart(ch, use_container_width=True)
+    # ========================================================
+    # DIRECTOR DE CARRERA: forzamos esta ruta si NO es DG
+    # ========================================================
+    if not es_direccion_general:
+        carrera_fija = (carrera or "").strip()
+        if not carrera_fija:
+            st.warning("No recibí la carrera desde app.py. En vista Director de carrera es obligatoria.")
             return
 
-        # Detalle por carrera
-        carreras = sorted([c for c in ba_v["Carrera"].dropna().unique().tolist() if c and str(c).lower() != "nan"])
-        if not carreras:
-            st.warning("No hay carreras con datos para la versión seleccionada.")
-            return
-
-        sel_carrera = st.selectbox("Selecciona la carrera", carreras, index=0)
-
-        prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(df_v, base_v, ba_v, sel_carrera, sel_version)
+        prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(
+            df_v, base_v, ba_v, carrera_fija, sel_version
+        )
 
         c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
         c1.metric("Promedio (0–10)", f"{prom_0_10:.2f}" if prom_0_10 is not None else "—")
@@ -484,13 +407,55 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
 
         return
 
-    # Director de carrera
-    carrera_fija = (carrera or "").strip()
-    if not carrera_fija:
-        st.warning("No recibí la carrera desde app.py. Pasa el parámetro carrera en esta vista.")
+    # ========================================================
+    # DIRECCIÓN GENERAL
+    # ========================================================
+    prom_inst_0_10 = float(pd.to_numeric(ba_v["Promedio_0_10"], errors="coerce").mean()) if not ba_v.empty else 0.0
+    prom_inst_pct = float(pd.to_numeric(ba_v["Porcentaje_0_100"], errors="coerce").mean()) if not ba_v.empty else 0.0
+    cov_inst_pct = float(pd.to_numeric(ba_v["Cobertura"], errors="coerce").mean()) if not ba_v.empty else 0.0
+    n_resp = int(ba_v["AlumnoID"].nunique()) if not ba_v.empty else 0
+
+    modo = st.radio("Vista", ["Institución (Resumen)", "Por carrera (Detalle)"], horizontal=True, index=0)
+    st.divider()
+
+    if modo == "Institución (Resumen)":
+        c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
+        c1.metric("Promedio (0–10)", f"{prom_inst_0_10:.2f}")
+        c2.metric("Porcentaje de acierto", f"{prom_inst_pct:.1f}%")
+        c3.metric("Cobertura (respondidas)", f"{cov_inst_pct:.1f}%")
+        c4.metric("Alumnos que respondieron", f"{n_resp:,}")
+
+        st.divider()
+
+        resumen = (
+            ba_v.groupby("Carrera", as_index=False)
+            .agg(
+                Promedio_0_10=("Promedio_0_10", "mean"),
+                Porcentaje=("Porcentaje_0_100", "mean"),
+                Cobertura=("Cobertura", "mean"),
+                Alumnos=("AlumnoID", "nunique"),
+            )
+            .sort_values("Porcentaje", ascending=False)
+        )
+
+        st.markdown("### Resultados por carrera")
+        st.dataframe(resumen, use_container_width=True, hide_index=True)
+
+        ch = _bar_h(resumen, "Carrera", "Porcentaje", "Porcentaje de acierto (0–100)")
+        if ch is not None:
+            st.altair_chart(ch, use_container_width=True)
         return
 
-    prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(df_v, base_v, ba_v, carrera_fija, sel_version)
+    carreras = sorted([c for c in ba_v["Carrera"].dropna().unique().tolist() if c and str(c).lower() != "nan"])
+    if not carreras:
+        st.warning("No hay carreras con datos para la versión seleccionada.")
+        return
+
+    sel_carrera = st.selectbox("Selecciona la carrera", carreras, index=0)
+
+    prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(
+        df_v, base_v, ba_v, sel_carrera, sel_version
+    )
 
     c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
     c1.metric("Promedio (0–10)", f"{prom_0_10:.2f}" if prom_0_10 is not None else "—")
