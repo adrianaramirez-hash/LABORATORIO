@@ -10,7 +10,7 @@ SHEET_RESP = "RESPUESTAS_LARGAS"
 
 
 # ============================================================
-# Helpers (mismo patrón que encuesta_calidad.py)
+# Helpers (misma lógica de carga que encuesta_calidad.py)
 # ============================================================
 def _dedupe_headers(headers: list[str]) -> list[str]:
     seen = {}
@@ -59,10 +59,6 @@ def _as_str(df: pd.DataFrame, col: str) -> pd.Series:
     return df[col].astype(str).str.strip()
 
 
-def _as_upper(df: pd.DataFrame, col: str) -> pd.Series:
-    return df[col].astype(str).str.strip().str.upper()
-
-
 def _pick_date_col(df: pd.DataFrame) -> str | None:
     for c in ["Fecha", "fecha", "Marca temporal", "Marca Temporal", "Timestamp", "timestamp", "Aplicación", "Aplicacion"]:
         if c in df.columns:
@@ -75,6 +71,36 @@ def _infer_year_from_version(version_value: str) -> int | None:
         return None
     m = re.search(r"(20\d{2})", str(version_value))
     return int(m.group(1)) if m else None
+
+
+def _normalize_option(x) -> str | pd.NA:
+    """
+    Normaliza clave/respuesta para compararlas:
+    - Acepta A/B/C/D aunque venga como "A)", "a.", "Opción A", etc.
+    - Acepta 1/2/3/4 -> A/B/C/D
+    """
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return pd.NA
+
+    s = str(x).strip().upper()
+    if not s or s == "NAN":
+        return pd.NA
+
+    # 1-4 => A-D
+    if s in {"1", "2", "3", "4"}:
+        return {"1": "A", "2": "B", "3": "C", "4": "D"}[s]
+
+    # Extrae primera letra A-D que aparezca
+    m = re.search(r"\b([ABCD])\b", s)
+    if m:
+        return m.group(1)
+
+    # Casos tipo "A)" "A." "A-" al inicio
+    m2 = re.match(r"^([ABCD])[\)\.\:\-\s]", s)
+    if m2:
+        return m2.group(1)
+
+    return pd.NA
 
 
 def _bar_h(df: pd.DataFrame, cat: str, val: str, title: str):
@@ -93,13 +119,8 @@ def _bar_h(df: pd.DataFrame, cat: str, val: str, title: str):
     )
 
 
-def _safe_mean(series: pd.Series) -> float:
-    s = pd.to_numeric(series, errors="coerce")
-    return float(s.mean()) if s.notna().any() else 0.0
-
-
 # ============================================================
-# Core: preparación y promedios (NO porcentajes)
+# Core
 # ============================================================
 def _prepare(base: pd.DataFrame, resp: pd.DataFrame):
     required_base = {"Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"}
@@ -118,13 +139,14 @@ def _prepare(base: pd.DataFrame, resp: pd.DataFrame):
     for c in ["Carrera", "Version", "ID_reactivo", "Matricula", "Grupo", "Correo"]:
         resp[c] = _as_str(resp, c)
 
-    base["Clave"] = _as_upper(base, "Clave")
-    resp["Respuesta_alumno"] = _as_upper(resp, "Respuesta_alumno")
-
     base["Puntos"] = pd.to_numeric(base["Puntos"], errors="coerce").fillna(1.0)
     base = base.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
 
-    # AlumnoID (solo para agregar; NO se muestra)
+    # Normaliza claves y respuestas a A/B/C/D
+    base["Clave_norm"] = base["Clave"].apply(_normalize_option)
+    resp["Resp_norm"] = resp["Respuesta_alumno"].apply(_normalize_option)
+
+    # AlumnoID (solo para agregación)
     resp["AlumnoID"] = resp["Matricula"].where(
         resp["Matricula"].notna() & (resp["Matricula"] != "") & (resp["Matricula"].str.lower() != "nan"),
         resp["Correo"],
@@ -132,14 +154,23 @@ def _prepare(base: pd.DataFrame, resp: pd.DataFrame):
 
     # Merge
     df = resp.merge(
-        base[["Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"]],
+        base[["Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave_norm", "Puntos"]],
         on=["Carrera", "Version", "ID_reactivo"],
         how="left",
     )
 
-    # Acierto / puntos
-    df["Acierto"] = (df["Respuesta_alumno"] == df["Clave"]).astype("Int64")
-    df["Puntos_obtenidos"] = df["Acierto"].fillna(0).astype(float) * df["Puntos"].fillna(0).astype(float)
+    # Diagnóstico: match base
+    df["Match_base"] = df["Clave_norm"].notna()
+
+    # Acierto (solo si hubo match y ambas normalizadas)
+    df["Acierto"] = (
+        (df["Match_base"])
+        & (df["Resp_norm"].notna())
+        & (df["Clave_norm"].notna())
+        & (df["Resp_norm"] == df["Clave_norm"])
+    ).astype(int)
+
+    df["Puntos_obtenidos"] = df["Acierto"].astype(float) * df["Puntos"].fillna(0).astype(float)
 
     # Puntos posibles por examen (Carrera+Version)
     puntos_posibles_cv = (
@@ -149,20 +180,18 @@ def _prepare(base: pd.DataFrame, resp: pd.DataFrame):
     )
     df = df.merge(puntos_posibles_cv, on=["Carrera", "Version"], how="left")
 
-    # Score por alumno = puntos_obtenidos / puntos_posibles
+    # Score por alumno (normalizado) -> Promedio 0–10
+    # Nota: usamos el denominador del examen completo (base) para esa carrera+version.
     by_alumno = (
         df.groupby(["AlumnoID", "Carrera", "Version"], as_index=False)
         .agg(Puntos_obtenidos=("Puntos_obtenidos", "sum"),
              Puntos_posibles_examen=("Puntos_posibles_examen", "first"))
     )
     by_alumno["Score"] = by_alumno.apply(
-        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"]) if r["Puntos_posibles_examen"] else 0.0,
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"]) if pd.notna(r["Puntos_posibles_examen"]) and r["Puntos_posibles_examen"] > 0 else pd.NA,
         axis=1,
     )
-
-    # Promedio en escala 0–10 (por defecto)
-    # Si tu examen se califica distinto, aquí se ajusta el factor.
-    by_alumno["Promedio_0_10"] = by_alumno["Score"] * 10.0
+    by_alumno["Promedio_0_10"] = pd.to_numeric(by_alumno["Score"], errors="coerce") * 10.0
 
     return base, resp, df, by_alumno
 
@@ -178,12 +207,12 @@ def _detalle_carrera(df: pd.DataFrame, base: pd.DataFrame, by_alumno: pd.DataFra
         ba_f = ba_f[ba_f["Version"] == version].copy()
 
     if base_f.empty or df_f.empty or ba_f.empty:
-        return 0.0, 0, pd.DataFrame(), pd.DataFrame()
+        return pd.NA, 0, pd.DataFrame(), pd.DataFrame()
 
-    prom_carrera_0_10 = float(ba_f["Promedio_0_10"].mean())
-    n_alumnos = int(ba_f["AlumnoID"].nunique())
+    prom_carrera_0_10 = float(pd.to_numeric(ba_f["Promedio_0_10"], errors="coerce").mean())
+    n_respondieron = int(ba_f["AlumnoID"].nunique())
 
-    # Área: promedio por alumno-área -> promedio de alumnos
+    # Área (promedio 0–10)
     area_pos = (
         base_f.groupby("Area", as_index=False)["Puntos"]
         .sum()
@@ -195,19 +224,17 @@ def _detalle_carrera(df: pd.DataFrame, base: pd.DataFrame, by_alumno: pd.DataFra
         .merge(area_pos, on="Area", how="left")
     )
     area_al["Score_area"] = area_al.apply(
-        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_area"]) if r["Puntos_posibles_area"] else 0.0,
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_area"]) if pd.notna(r["Puntos_posibles_area"]) and r["Puntos_posibles_area"] > 0 else pd.NA,
         axis=1,
     )
-    area_al["Promedio_area_0_10"] = area_al["Score_area"] * 10.0
-
+    area_al["Promedio_area"] = pd.to_numeric(area_al["Score_area"], errors="coerce") * 10.0
     area_df = (
-        area_al.groupby("Area", as_index=False)["Promedio_area_0_10"]
+        area_al.groupby("Area", as_index=False)["Promedio_area"]
         .mean()
-        .rename(columns={"Promedio_area_0_10": "Promedio_area"})
         .sort_values("Promedio_area", ascending=False)
     )
 
-    # Materia: promedio por alumno-materia -> promedio de alumnos
+    # Materia (promedio 0–10)
     mat_pos = (
         base_f.groupby("Materia", as_index=False)["Puntos"]
         .sum()
@@ -219,29 +246,26 @@ def _detalle_carrera(df: pd.DataFrame, base: pd.DataFrame, by_alumno: pd.DataFra
         .merge(mat_pos, on="Materia", how="left")
     )
     mat_al["Score_materia"] = mat_al.apply(
-        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_materia"]) if r["Puntos_posibles_materia"] else 0.0,
+        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_materia"]) if pd.notna(r["Puntos_posibles_materia"]) and r["Puntos_posibles_materia"] > 0 else pd.NA,
         axis=1,
     )
-    mat_al["Promedio_materia_0_10"] = mat_al["Score_materia"] * 10.0
-
+    mat_al["Promedio_materia"] = pd.to_numeric(mat_al["Score_materia"], errors="coerce") * 10.0
     materia_df = (
-        mat_al.groupby("Materia", as_index=False)["Promedio_materia_0_10"]
+        mat_al.groupby("Materia", as_index=False)["Promedio_materia"]
         .mean()
-        .rename(columns={"Promedio_materia_0_10": "Promedio_materia"})
         .sort_values("Promedio_materia", ascending=False)
     )
 
-    return prom_carrera_0_10, n_alumnos, area_df, materia_df
+    return prom_carrera_0_10, n_respondieron, area_df, materia_df
 
 
 # ============================================================
-# UI: layout tipo "pestaña de costado" para Dirección General
+# Render
 # ============================================================
 def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = None, carrera: str | None = None):
     if not vista:
         vista = "Dirección General"
 
-    # Mensaje piloto + aplicación
     st.info("Examen departamental: **Piloto**. Resultados con fines de diagnóstico y mejora continua.")
 
     # Carga
@@ -254,7 +278,7 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
         st.exception(e)
         return
 
-    # Año de aplicación (ideal: Fecha/Marca temporal en RESPUESTAS_LARGAS)
+    # Aplicación (año)
     date_col = _pick_date_col(resp)
     year_aplicacion = None
     if date_col:
@@ -262,15 +286,12 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
         if dt.notna().any():
             year_aplicacion = int(dt.dropna().dt.year.mode().iloc[0])
     if year_aplicacion is None:
-        # fallback: inferir de Version
-        sample_version = None
-        if base["Version"].notna().any():
-            sample_version = str(base["Version"].dropna().iloc[0])
-        year_aplicacion = _infer_year_from_version(sample_version) if sample_version else None
+        sample_version = str(base["Version"].dropna().iloc[0]) if base["Version"].notna().any() else ""
+        year_aplicacion = _infer_year_from_version(sample_version)
 
     st.caption(f"Aplicación: **{year_aplicacion if year_aplicacion else '—'}**")
 
-    # Selector de versión (para histórico a 5 años)
+    # Selector de versión
     versiones = sorted([v for v in base["Version"].dropna().unique().tolist() if v and str(v).lower() != "nan"])
     sel_version = st.selectbox("Aplicación / Versión", ["Todas"] + versiones, index=0)
 
@@ -283,30 +304,38 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
         df_v = df_v[df_v["Version"] == sel_version].copy()
         ba_v = ba_v[ba_v["Version"] == sel_version].copy()
 
-    # =========================
-    # Dirección General: UI con "pestañas de costado" (radio en sidebar)
-    # =========================
-    if vista == "Dirección General":
-        st.sidebar.markdown("## Exámenes departamentales")
-        dg_tab = st.sidebar.radio(
-            "Vista",
-            ["Institución (Resumen)", "Por carrera (Detalle)"],
-            index=0,
+    # Diagnóstico mínimo (sin ensuciar UI):
+    # Si no normaliza bien, veríamos demasiados NA en Clave_norm/Resp_norm.
+    pct_match = float(df_v["Match_base"].mean()) if len(df_v) else 0.0
+    if pct_match < 0.8:
+        st.warning(
+            "Aviso técnico: hay muchas respuestas que no están encontrando su reactivo en la base "
+            "(match bajo). Esto puede afectar promedios. Revisa consistencia de Carrera/Version/ID_reactivo."
         )
 
-        # KPI institucional (promedio 0–10)
-        prom_inst_0_10 = float(ba_v["Promedio_0_10"].mean()) if not ba_v.empty else 0.0
-        n_alumnos_inst = int(ba_v["AlumnoID"].nunique()) if not ba_v.empty else 0
+    # ========================================================
+    # Dirección General: selector EN PANTALLA (no sidebar)
+    # ========================================================
+    if vista == "Dirección General":
+        modo = st.radio(
+            "Vista",
+            ["Institución (Resumen)", "Por carrera (Detalle)"],
+            horizontal=True,
+            index=0,
+        )
+        st.divider()
 
-        if dg_tab == "Institución (Resumen)":
+        prom_inst = float(pd.to_numeric(ba_v["Promedio_0_10"], errors="coerce").mean()) if not ba_v.empty else 0.0
+        n_resp = int(ba_v["AlumnoID"].nunique()) if not ba_v.empty else 0
+
+        if modo == "Institución (Resumen)":
             c1, c2, c3 = st.columns([1.2, 1.0, 1.0])
-            c1.metric("Promedio general institucional (0–10)", f"{prom_inst_0_10:.2f}")
-            c2.metric("Alumnos que respondieron", f"{n_alumnos_inst:,}")
+            c1.metric("Promedio general institucional (0–10)", f"{prom_inst:.2f}")
+            c2.metric("Alumnos que respondieron", f"{n_resp:,}")
             c3.metric("Carreras con datos", f"{ba_v['Carrera'].nunique() if not ba_v.empty else 0:,}")
 
             st.divider()
 
-            # Promedio por carrera (0–10) + alumnos
             resumen = (
                 ba_v.groupby("Carrera", as_index=False)
                 .agg(Promedio=("Promedio_0_10", "mean"), Alumnos=("AlumnoID", "nunique"))
@@ -322,9 +351,7 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
 
             return
 
-        # -------------------------
-        # Detalle por carrera (lo mismo que ve director)
-        # -------------------------
+        # Por carrera (detalle) — selector dentro de pantalla
         carreras = sorted([c for c in ba_v["Carrera"].dropna().unique().tolist() if c and str(c).lower() != "nan"])
         if not carreras:
             st.warning("No hay carreras con datos para la versión seleccionada.")
@@ -335,7 +362,7 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
         prom_c, n_al, area_df, materia_df = _detalle_carrera(df_v, base_v, ba_v, sel_carrera, sel_version)
 
         c1, c2 = st.columns([1.2, 1.0])
-        c1.metric("Promedio general (0–10)", f"{prom_c:.2f}")
+        c1.metric("Promedio general (0–10)", f"{float(prom_c):.2f}" if pd.notna(prom_c) else "—")
         c2.metric("Alumnos que respondieron", f"{n_al:,}")
 
         st.divider()
@@ -354,9 +381,9 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
 
         return
 
-    # =========================
-    # Director de carrera: solo su carrera, sin “alumnos” salvo conteo
-    # =========================
+    # ========================================================
+    # Director de carrera
+    # ========================================================
     carrera_fija = (carrera or "").strip()
     if not carrera_fija:
         st.warning("No recibí la carrera desde app.py. Pasa el parámetro carrera en esta vista.")
@@ -365,7 +392,7 @@ def render_examenes_departamentales(spreadsheet_url: str, vista: str | None = No
     prom_c, n_al, area_df, materia_df = _detalle_carrera(df_v, base_v, ba_v, carrera_fija, sel_version)
 
     c1, c2 = st.columns([1.2, 1.0])
-    c1.metric("Promedio general (0–10)", f"{prom_c:.2f}")
+    c1.metric("Promedio general (0–10)", f"{float(prom_c):.2f}" if pd.notna(prom_c) else "—")
     c2.metric("Alumnos que respondieron", f"{n_al:,}")
 
     st.divider()
