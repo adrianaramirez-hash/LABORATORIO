@@ -105,6 +105,7 @@ CATALOGO_CARRERAS = [
     "Maestría: Entrenamiento Deportivo",
     "Maestría: Tecnología e Innovación Educativa",
     "Licenciatura Entrenamiento Deportivo",
+     "EDUCON",
     "Centro de Idiomas",
 ]
 
