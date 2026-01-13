@@ -47,6 +47,19 @@ def _first_nonempty_row_index(values: list[list[str]]) -> int:
             return i
     return 0
 
+def _load_creds_dict() -> dict:
+    """
+    st.secrets["gcp_service_account_json"] en Streamlit puede venir como:
+    - AttrDict (lo común cuando está en formato TOML)
+    - dict
+    - str (json)
+    Esta función lo normaliza a dict seguro.
+    """
+    raw = st.secrets["gcp_service_account_json"]
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return dict(raw)
+
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     """
@@ -54,8 +67,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
       df_accesos (solo activos, email normalizado)
       service_account_email (para debug/permisos)
     """
-    raw = st.secrets["gcp_service_account_json"]
-    creds_dict = dict(raw) if isinstance(raw, dict) else json.loads(raw)
+    creds_dict = _load_creds_dict()
     sa_email = creds_dict.get("client_email", "")
 
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
@@ -90,12 +102,10 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     header = [str(c).strip() for c in values[header_idx]]
     data = values[header_idx + 1 :]
 
-    # Ajuste: si header viene corto, expandir al máximo de columnas detectadas
     max_cols = max(len(header), max((len(r) for r in data), default=len(header)))
     header = header + [""] * (max_cols - len(header))
     header = [h if h else f"COL_{i+1}" for i, h in enumerate(header)]
 
-    # Normalizar filas a mismo número de columnas
     norm_data = []
     for r in data:
         r = [str(c) for c in r]
@@ -107,7 +117,6 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     # Normalización de columnas clave (tolerante a mayúsculas/minúsculas)
     df.columns = [str(c).strip().upper() for c in df.columns]
 
-    # Asegurar columnas esperadas
     for col in ["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO"]:
         if col not in df.columns:
             df[col] = ""
@@ -119,7 +128,6 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     activo_raw = df["ACTIVO"].astype(str).str.strip().str.upper()
     df["ACTIVO"] = activo_raw.isin(["TRUE", "1", "SI", "SÍ", "YES", "ACTIVO"])
 
-    # Limpiar filas vacías y dejar solo activos
     df = df[df["EMAIL"] != ""]
     df = df[df["ACTIVO"]]
 
@@ -169,58 +177,51 @@ except Exception as e:
 st.divider()
 
 # ============================================================
-# LOGIN / ACCESO (AHORA EN EL CUERPO, NO EN SIDEBAR)
+# LOGIN / ACCESO (EN EL CUERPO, NO EN SIDEBAR)
 # ============================================================
-login_box = st.container()
+st.subheader("Acceso")
 
-with login_box:
-    st.subheader("Acceso")
+if "user_rol" in st.session_state:
+    c1, c2 = st.columns([4, 1], vertical_alignment="center")
+    with c1:
+        st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
+    with c2:
+        if st.button("Salir", use_container_width=True):
+            for k in ["user_email", "user_rol", "user_servicio"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+else:
+    email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
+    if st.button("Entrar", use_container_width=True):
+        try:
+            df_accesos, sa_email = cargar_accesos_df()
+            res = resolver_permiso_por_email(email_input, df_accesos)
 
-    # Si ya hay sesión, mostrar estado y botón salir
-    if "user_rol" in st.session_state:
-        c1, c2 = st.columns([4, 1], vertical_alignment="center")
-        with c1:
-            st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
-        with c2:
-            if st.button("Salir", use_container_width=True):
-                for k in ["user_email", "user_rol", "user_servicio"]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-    else:
-        email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
-        if st.button("Entrar", use_container_width=True):
-            try:
-                df_accesos, sa_email = cargar_accesos_df()
-                res = resolver_permiso_por_email(email_input, df_accesos)
-
-                if not res["ok"]:
-                    st.error(res["mensaje"])
-                    st.stop()
-
-                st.session_state["user_email"] = (email_input or "").strip().lower()
-                st.session_state["user_rol"] = res["rol"]           # DG / DC
-                st.session_state["user_servicio"] = res["servicio"] # None si DG
-                st.rerun()
-
-            except Exception as e:
-                # Mensaje claro + datos accionables (service account)
-                st.error("No fue posible validar el acceso. Revisa permisos del Google Sheet de ACCESOS.")
-                try:
-                    raw = st.secrets["gcp_service_account_json"]
-                    creds_dict = dict(raw) if isinstance(raw, dict) else json.loads(raw)
-                    sa_email = creds_dict.get("client_email", "")
-                except Exception:
-                    sa_email = ""
-
-                if sa_email:
-                    st.info(f"Comparte el Sheet de ACCESOS con este correo (Viewer): {sa_email}")
-
-                if DEBUG:
-                    st.exception(e)
-                else:
-                    with st.expander("Ver detalle técnico (para diagnóstico)"):
-                        st.write(str(e))
+            if not res["ok"]:
+                st.error(res["mensaje"])
                 st.stop()
+
+            st.session_state["user_email"] = (email_input or "").strip().lower()
+            st.session_state["user_rol"] = res["rol"]           # DG / DC
+            st.session_state["user_servicio"] = res["servicio"] # None si DG
+            st.rerun()
+
+        except Exception as e:
+            st.error("No fue posible validar el acceso. Revisa permisos del Google Sheet de ACCESOS.")
+            # Mostrar service account para compartir el Sheet (si aplica)
+            try:
+                sa_email = _load_creds_dict().get("client_email", "")
+            except Exception:
+                sa_email = ""
+            if sa_email:
+                st.info(f"Comparte el Sheet de ACCESOS con este correo (Viewer): {sa_email}")
+
+            if DEBUG:
+                st.exception(e)
+            else:
+                with st.expander("Ver detalle técnico (para diagnóstico)"):
+                    st.write(str(e))
+            st.stop()
 
 # Si no hay sesión, detener aquí (para que no cargue módulos)
 if "user_rol" not in st.session_state:
