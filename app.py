@@ -17,7 +17,6 @@ from google.oauth2.service_account import Credentials
 # ============================================================
 st.set_page_config(page_title="Dirección Académica", layout="wide")
 
-# Cambia a True si quieres ver excepciones completas
 DEBUG = False
 
 # ============================================================
@@ -48,37 +47,38 @@ def _first_nonempty_row_index(values: list[list[str]]) -> int:
     return 0
 
 def _load_creds_dict() -> dict:
-    """
-    st.secrets["gcp_service_account_json"] en Streamlit puede venir como:
-    - AttrDict (lo común cuando está en formato TOML)
-    - dict
-    - str (json)
-    Esta función lo normaliza a dict seguro.
-    """
     raw = st.secrets["gcp_service_account_json"]
     if isinstance(raw, str):
         return json.loads(raw)
     return dict(raw)
 
+def _goto_seccion(nombre_seccion: str):
+    st.session_state["seccion_forzada"] = nombre_seccion
+    st.rerun()
+
 def _placeholder_en_construccion(titulo: str):
-    """
-    Placeholder uniforme para módulos aún no implementados.
-    """
     st.subheader(titulo)
     st.warning("📝 En construcción")
-    st.caption(
-        "Este módulo se habilitará próximamente. "
-        "Mientras tanto, puedes consultar los apartados ya disponibles: "
-        "Encuesta de calidad, Observación de clases, Exámenes departamentales y Aulas virtuales."
-    )
+    st.caption("Este módulo se habilitará próximamente.")
+
+    st.markdown("**Módulos disponibles:**")
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if st.button("🔎 Observación de clases", use_container_width=True, key=f"btn_oc_{titulo}"):
+            _goto_seccion("Observación de clases")
+    with c2:
+        if st.button("📋 Encuesta de calidad", use_container_width=True, key=f"btn_ec_{titulo}"):
+            _goto_seccion("Encuesta de calidad")
+    with c3:
+        if st.button("🧾 Exámenes departamentales", use_container_width=True, key=f"btn_ed_{titulo}"):
+            _goto_seccion("Exámenes departamentales")
+    with c4:
+        if st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, key=f"btn_av_{titulo}"):
+            _goto_seccion("Aulas virtuales")
 
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
-    """
-    Devuelve:
-      df_accesos (solo activos, email normalizado)
-      service_account_email (para debug/permisos)
-    """
     creds_dict = _load_creds_dict()
     sa_email = creds_dict.get("client_email", "")
 
@@ -88,21 +88,18 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     sheet_id = _extract_sheet_id(ACCESOS_SHEET_URL)
     sh = client.open_by_key(sheet_id)
 
-    # 1) Intentar por nombre
     ws = None
     try:
         ws = sh.worksheet(ACCESOS_TAB_NAME)
     except Exception:
         ws = None
 
-    # 2) Si no existe por nombre, intentar por GID
     if ws is None:
         try:
             ws = sh.get_worksheet_by_id(ACCESOS_GID)
         except Exception:
             ws = None
 
-    # 3) Fallback final
     if ws is None:
         ws = sh.sheet1
 
@@ -125,8 +122,6 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
         norm_data.append(r[:max_cols])
 
     df = pd.DataFrame(norm_data, columns=header)
-
-    # Normalización de columnas clave (tolerante a mayúsculas/minúsculas)
     df.columns = [str(c).strip().upper() for c in df.columns]
 
     for col in ["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO"]:
@@ -189,7 +184,7 @@ except Exception as e:
 st.divider()
 
 # ============================================================
-# LOGIN / ACCESO (EN EL CUERPO, NO EN SIDEBAR)
+# LOGIN / ACCESO
 # ============================================================
 st.subheader("Acceso")
 
@@ -206,7 +201,7 @@ else:
     email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
     if st.button("Entrar", use_container_width=True):
         try:
-            df_accesos, sa_email = cargar_accesos_df()
+            df_accesos, _ = cargar_accesos_df()
             res = resolver_permiso_por_email(email_input, df_accesos)
 
             if not res["ok"]:
@@ -214,13 +209,12 @@ else:
                 st.stop()
 
             st.session_state["user_email"] = (email_input or "").strip().lower()
-            st.session_state["user_rol"] = res["rol"]           # DG / DC
-            st.session_state["user_servicio"] = res["servicio"] # None si DG
+            st.session_state["user_rol"] = res["rol"]
+            st.session_state["user_servicio"] = res["servicio"]
             st.rerun()
 
         except Exception as e:
             st.error("No fue posible validar el acceso. Revisa permisos del Google Sheet de ACCESOS.")
-            # Mostrar service account para compartir el Sheet (si aplica)
             try:
                 sa_email = _load_creds_dict().get("client_email", "")
             except Exception:
@@ -235,7 +229,6 @@ else:
                     st.write(str(e))
             st.stop()
 
-# Si no hay sesión, detener aquí (para que no cargue módulos)
 if "user_rol" not in st.session_state:
     st.stop()
 
@@ -289,15 +282,11 @@ CATALOGO_CARRERAS = [
     "Centro de Idiomas",
 ]
 
-# ============================================================
-# Vista/carrera AUTOMÁTICAS por rol
-# ============================================================
 ROL = st.session_state["user_rol"]
 SERVICIO_DC = st.session_state.get("user_servicio")
 
 vista = "Dirección General" if ROL == "DG" else "Director de carrera"
 
-# Selector de servicio: DG sí; DC no
 carrera = None
 try:
     if ROL == "DG":
@@ -318,20 +307,33 @@ st.divider()
 # ============================================================
 # Menú de apartados (Plan anual)
 # ============================================================
+SECCIONES = [
+    "Encuesta de calidad",
+    "Observación de clases",
+    "Evaluación docente",
+    "Capacitaciones",
+    "Índice de reprobación",
+    "Titulación",
+    "Ceneval",
+    "Exámenes departamentales",
+    "Aulas virtuales",
+]
+
+# Si venimos de un botón (placeholder), forzar selección
+if "seccion_forzada" in st.session_state:
+    try:
+        idx_forzada = SECCIONES.index(st.session_state["seccion_forzada"])
+    except ValueError:
+        idx_forzada = 0
+    st.session_state.pop("seccion_forzada", None)
+else:
+    idx_forzada = 0
+
 try:
     seccion = st.selectbox(
         "Selecciona el apartado del plan anual que deseas revisar:",
-        [
-            "Encuesta de calidad",
-            "Observación de clases",
-            "Evaluación docente",
-            "Capacitaciones",
-            "Índice de reprobación",
-            "Titulación",
-            "Ceneval",
-            "Exámenes departamentales",
-            "Aulas virtuales",
-        ],
+        SECCIONES,
+        index=idx_forzada,
     )
 except Exception as e:
     st.error("Error creando selector de apartado.")
@@ -384,10 +386,6 @@ try:
         st.subheader("Panel inicial")
         st.write(f"Rol: **{ROL}**")
         st.write(f"Vista actual: **{vista}**")
-        if carrera:
-            st.write(f"Servicio seleccionado: **{carrera}**")
-        else:
-            st.write("Servicio seleccionado: **Todos**")
         st.write(f"Apartado seleccionado: **{seccion}**")
 
 except Exception as e:
