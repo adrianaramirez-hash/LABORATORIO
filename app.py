@@ -4,6 +4,7 @@ import streamlit as st
 import encuesta_calidad
 import observacion_clases
 import aulas_virtuales
+import indice_reprobacion  # ✅ NUEVO
 from examenes_departamentales import render_examenes_departamentales
 
 import pandas as pd
@@ -362,7 +363,8 @@ try:
         _placeholder_en_construccion("Capacitaciones")
 
     elif seccion == "Índice de reprobación":
-        _placeholder_en_construccion("Índice de reprobación")
+        st.subheader("Índice de reprobación")
+        indice_reprobacion.render_indice_reprobacion(vista=vista, carrera=carrera)  # ✅ NUEVO
 
     elif seccion == "Titulación":
         _placeholder_en_construccion("Titulación")
