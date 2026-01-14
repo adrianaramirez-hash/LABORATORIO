@@ -78,6 +78,20 @@ def _norm_email(s: str) -> str:
     s = s.replace(" ", "")       # espacios normales
     return s.strip().lower()
 
+def _parse_servicios_cell(cell: str) -> list[str]:
+    """
+    Permite múltiples servicios/carreras en SERVICIO_ASIGNADO:
+      - Separadores: coma (,) o pipe (|)
+      - Respeta el texto tal cual (no mapea nombres)
+    """
+    if cell is None:
+        return []
+    txt = str(cell).strip()
+    if not txt:
+        return []
+    parts = re.split(r"[,\|]", txt)
+    return [p.strip() for p in parts if p.strip()]
+
 def _goto_seccion(nombre_seccion: str):
     st.session_state["seccion_forzada"] = nombre_seccion
     st.rerun()
@@ -145,7 +159,7 @@ def _placeholder_en_construccion(titulo: str):
             st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, disabled=True, key=f"btn_av_dis_{titulo}")
 
 # ============================================================
-# Lectura de ACCESOS (cacheada, pero la forzamos a leer fresco al login con .clear())
+# Lectura de ACCESOS (cacheada, pero forzamos lectura fresca al login con .clear())
 # ============================================================
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
@@ -214,33 +228,33 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     email_norm = _norm_email(email)
     if not email_norm:
-        return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "Captura tu correo."}
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "Captura tu correo."}
 
     fila = df_accesos[df_accesos["EMAIL"] == email_norm]
     if fila.empty:
         return {
             "ok": False,
             "rol": None,
-            "servicio": None,
+            "servicios": [],
             "modulos": set(),
             "mensaje": "Acceso no encontrado o inactivo. Verifica tu correo en ACCESOS.",
         }
 
     rol = str(fila.iloc[0]["ROL"]).strip().upper()
-    servicio = str(fila.iloc[0]["SERVICIO_ASIGNADO"]).strip()
+    servicios = _parse_servicios_cell(fila.iloc[0].get("SERVICIO_ASIGNADO", ""))
     modulos = _parse_modulos_cell(fila.iloc[0].get("MODULOS", ""))
 
     if rol not in ["DG", "DC"]:
-        return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "ROL inválido en ACCESOS. Usa DG o DC."}
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "ROL inválido en ACCESOS. Usa DG o DC."}
 
-    if rol == "DC" and not servicio:
-        return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
+    if rol == "DC" and not servicios:
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
 
     if not modulos:
         return {
             "ok": False,
             "rol": None,
-            "servicio": None,
+            "servicios": [],
             "modulos": set(),
             "mensaje": "Tu usuario no tiene MODULOS asignados en ACCESOS. Coloca ALL o una lista (ej. observacion_clases,aulas_virtuales).",
         }
@@ -248,7 +262,7 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     return {
         "ok": True,
         "rol": rol,
-        "servicio": (servicio if rol == "DC" else None),
+        "servicios": (servicios if rol == "DC" else []),
         "modulos": modulos,
         "mensaje": "OK",
     }
@@ -282,14 +296,21 @@ if "user_rol" in st.session_state:
         st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
     with c2:
         if st.button("Salir", use_container_width=True):
-            for k in ["user_email", "user_rol", "user_servicio", "user_modulos", "user_allow_all"]:
+            for k in [
+                "user_email",
+                "user_rol",
+                "user_servicios",
+                "user_modulos",
+                "user_allow_all",
+                "carrera_seleccionada_dc",
+            ]:
                 st.session_state.pop(k, None)
             st.rerun()
 else:
     email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
     if st.button("Entrar", use_container_width=True):
         try:
-            # ✅ FORZAR lectura actual: invalida cache antes de leer
+            # ✅ Forzar lectura actual: invalida cache antes de leer
             cargar_accesos_df.clear()
 
             df_accesos, _ = cargar_accesos_df()
@@ -304,9 +325,10 @@ else:
 
             st.session_state["user_email"] = _norm_email(email_input)
             st.session_state["user_rol"] = res["rol"]
-            st.session_state["user_servicio"] = res["servicio"]
+            st.session_state["user_servicios"] = res["servicios"]  # ✅ ahora lista
             st.session_state["user_modulos"] = res["modulos"]
             st.session_state["user_allow_all"] = ("ALL" in res["modulos"])
+            st.session_state.pop("carrera_seleccionada_dc", None)  # reinicia selección al entrar
             st.rerun()
 
         except Exception as e:
@@ -331,7 +353,7 @@ if "user_rol" not in st.session_state:
 st.divider()
 
 # ============================================================
-# Catálogo de carreras
+# Catálogo de carreras (solo para DG; para DC ahora usa su lista)
 # ============================================================
 CATALOGO_CARRERAS = [
     "Preparatoria",
@@ -379,7 +401,7 @@ CATALOGO_CARRERAS = [
 ]
 
 ROL = st.session_state["user_rol"]
-SERVICIO_DC = st.session_state.get("user_servicio")
+SERVICIOS_DC = st.session_state.get("user_servicios") or []
 
 vista = "Dirección General" if ROL == "DG" else "Director de carrera"
 
@@ -390,8 +412,23 @@ try:
         sel = st.selectbox("Servicio / carrera:", opciones, index=0)
         carrera = None if sel == "Todos" else sel
     else:
-        carrera = SERVICIO_DC
-        st.info(f"Acceso limitado a: **{carrera}**")
+        # ✅ DC con 1 o múltiples carreras
+        if isinstance(SERVICIOS_DC, str):
+            SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
+
+        if len(SERVICIOS_DC) == 1:
+            carrera = SERVICIOS_DC[0]
+            st.info(f"Acceso limitado a: **{carrera}**")
+        else:
+            # Persistir selección
+            default_idx = 0
+            prev = st.session_state.get("carrera_seleccionada_dc")
+            if prev and prev in SERVICIOS_DC:
+                default_idx = SERVICIOS_DC.index(prev)
+
+            carrera = st.selectbox("Selecciona el servicio/carrera:", SERVICIOS_DC, index=default_idx)
+            st.session_state["carrera_seleccionada_dc"] = carrera
+            st.caption("Acceso limitado a tus servicios asignados.")
 except Exception as e:
     st.error("Error configurando acceso por rol.")
     if DEBUG:
