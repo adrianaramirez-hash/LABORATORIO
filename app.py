@@ -33,6 +33,21 @@ SCOPES = [
 ]
 
 # ============================================================
+# Módulos: claves internas (columna MODULOS) y nombres visibles
+# ============================================================
+MOD_KEY_BY_SECCION = {
+    "Encuesta de calidad": "encuesta_calidad",
+    "Observación de clases": "observacion_clases",
+    "Evaluación docente": "evaluacion_docente",
+    "Capacitaciones": "capacitaciones",
+    "Índice de reprobación": "indice_reprobacion",
+    "Titulación": "titulacion",
+    "Ceneval": "ceneval",
+    "Exámenes departamentales": "examenes_departamentales",
+    "Aulas virtuales": "aulas_virtuales",
+}
+
+# ============================================================
 # Helpers
 # ============================================================
 def _extract_sheet_id(url: str) -> str:
@@ -57,6 +72,30 @@ def _goto_seccion(nombre_seccion: str):
     st.session_state["seccion_forzada"] = nombre_seccion
     st.rerun()
 
+def _parse_modulos_cell(modulos_cell: str) -> set[str]:
+    """
+    Reglas:
+      - ALL => acceso total
+      - "a,b,c" => set {"a","b","c"}
+      - vacío => set vacío (sin módulos)
+    """
+    if modulos_cell is None:
+        return set()
+    txt = str(modulos_cell).strip()
+    if not txt:
+        return set()
+    if txt.upper() == "ALL":
+        return {"ALL"}
+    parts = [p.strip() for p in txt.split(",") if p.strip()]
+    return set(parts)
+
+def _is_modulo_visible(mod_key: str) -> bool:
+    permitted = st.session_state.get("user_modulos", set())
+    allow_all = st.session_state.get("user_allow_all", False)
+    if allow_all:
+        return True
+    return mod_key in permitted
+
 def _placeholder_en_construccion(titulo: str):
     st.subheader(titulo)
     st.warning("📝 En construcción")
@@ -64,19 +103,35 @@ def _placeholder_en_construccion(titulo: str):
 
     st.markdown("**Módulos disponibles:**")
 
+    # Botones solo si el usuario tiene permitido ese módulo
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        if st.button("🔎 Observación de clases", use_container_width=True, key=f"btn_oc_{titulo}"):
-            _goto_seccion("Observación de clases")
+        if _is_modulo_visible(MOD_KEY_BY_SECCION["Observación de clases"]):
+            if st.button("🔎 Observación de clases", use_container_width=True, key=f"btn_oc_{titulo}"):
+                _goto_seccion("Observación de clases")
+        else:
+            st.button("🔎 Observación de clases", use_container_width=True, disabled=True, key=f"btn_oc_dis_{titulo}")
+
     with c2:
-        if st.button("📋 Encuesta de calidad", use_container_width=True, key=f"btn_ec_{titulo}"):
-            _goto_seccion("Encuesta de calidad")
+        if _is_modulo_visible(MOD_KEY_BY_SECCION["Encuesta de calidad"]):
+            if st.button("📋 Encuesta de calidad", use_container_width=True, key=f"btn_ec_{titulo}"):
+                _goto_seccion("Encuesta de calidad")
+        else:
+            st.button("📋 Encuesta de calidad", use_container_width=True, disabled=True, key=f"btn_ec_dis_{titulo}")
+
     with c3:
-        if st.button("🧾 Exámenes departamentales", use_container_width=True, key=f"btn_ed_{titulo}"):
-            _goto_seccion("Exámenes departamentales")
+        if _is_modulo_visible(MOD_KEY_BY_SECCION["Exámenes departamentales"]):
+            if st.button("🧾 Exámenes departamentales", use_container_width=True, key=f"btn_ed_{titulo}"):
+                _goto_seccion("Exámenes departamentales")
+        else:
+            st.button("🧾 Exámenes departamentales", use_container_width=True, disabled=True, key=f"btn_ed_dis_{titulo}")
+
     with c4:
-        if st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, key=f"btn_av_{titulo}"):
-            _goto_seccion("Aulas virtuales")
+        if _is_modulo_visible(MOD_KEY_BY_SECCION["Aulas virtuales"]):
+            if st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, key=f"btn_av_{titulo}"):
+                _goto_seccion("Aulas virtuales")
+        else:
+            st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, disabled=True, key=f"btn_av_dis_{titulo}")
 
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
@@ -106,7 +161,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 
     values = ws.get_all_values()
     if not values or len(values) < 1:
-        return pd.DataFrame(columns=["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO"]), sa_email
+        return pd.DataFrame(columns=["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO", "MODULOS"]), sa_email
 
     header_idx = _first_nonempty_row_index(values)
     header = [str(c).strip() for c in values[header_idx]]
@@ -125,13 +180,14 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     df = pd.DataFrame(norm_data, columns=header)
     df.columns = [str(c).strip().upper() for c in df.columns]
 
-    for col in ["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO"]:
+    for col in ["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO", "MODULOS"]:
         if col not in df.columns:
             df[col] = ""
 
     df["EMAIL"] = df["EMAIL"].astype(str).str.strip().str.lower()
     df["ROL"] = df["ROL"].astype(str).str.strip().str.upper()
     df["SERVICIO_ASIGNADO"] = df["SERVICIO_ASIGNADO"].astype(str).str.strip()
+    df["MODULOS"] = df["MODULOS"].astype(str).str.strip()
 
     activo_raw = df["ACTIVO"].astype(str).str.strip().str.upper()
     df["ACTIVO"] = activo_raw.isin(["TRUE", "1", "SI", "SÍ", "YES", "ACTIVO"])
@@ -144,7 +200,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     email_norm = (email or "").strip().lower()
     if not email_norm:
-        return {"ok": False, "rol": None, "servicio": None, "mensaje": "Captura tu correo."}
+        return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "Captura tu correo."}
 
     fila = df_accesos[df_accesos["EMAIL"] == email_norm]
     if fila.empty:
@@ -152,19 +208,37 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
             "ok": False,
             "rol": None,
             "servicio": None,
+            "modulos": set(),
             "mensaje": "Acceso no encontrado o inactivo. Verifica tu correo en ACCESOS.",
         }
 
     rol = str(fila.iloc[0]["ROL"]).strip().upper()
     servicio = str(fila.iloc[0]["SERVICIO_ASIGNADO"]).strip()
+    modulos = _parse_modulos_cell(fila.iloc[0].get("MODULOS", ""))
 
     if rol not in ["DG", "DC"]:
-        return {"ok": False, "rol": None, "servicio": None, "mensaje": "ROL inválido en ACCESOS. Usa DG o DC."}
+        return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "ROL inválido en ACCESOS. Usa DG o DC."}
 
     if rol == "DC" and not servicio:
-        return {"ok": False, "rol": None, "servicio": None, "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
+        return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
 
-    return {"ok": True, "rol": rol, "servicio": (servicio if rol == "DC" else None), "mensaje": "OK"}
+    # Seguridad: si no tiene módulos asignados, no verá ninguno (debe venir ALL o lista)
+    if not modulos:
+        return {
+            "ok": False,
+            "rol": None,
+            "servicio": None,
+            "modulos": set(),
+            "mensaje": "Tu usuario no tiene MODULOS asignados en ACCESOS. Coloca ALL o una lista (ej. observacion_clases,aulas_virtuales).",
+        }
+
+    return {
+        "ok": True,
+        "rol": rol,
+        "servicio": (servicio if rol == "DC" else None),
+        "modulos": modulos,
+        "mensaje": "OK",
+    }
 
 # ============================================================
 # Header (logo + título)
@@ -195,7 +269,7 @@ if "user_rol" in st.session_state:
         st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
     with c2:
         if st.button("Salir", use_container_width=True):
-            for k in ["user_email", "user_rol", "user_servicio"]:
+            for k in ["user_email", "user_rol", "user_servicio", "user_modulos", "user_allow_all"]:
                 st.session_state.pop(k, None)
             st.rerun()
 else:
@@ -212,6 +286,8 @@ else:
             st.session_state["user_email"] = (email_input or "").strip().lower()
             st.session_state["user_rol"] = res["rol"]
             st.session_state["user_servicio"] = res["servicio"]
+            st.session_state["user_modulos"] = res["modulos"]
+            st.session_state["user_allow_all"] = ("ALL" in res["modulos"])
             st.rerun()
 
         except Exception as e:
@@ -306,9 +382,9 @@ except Exception as e:
 st.divider()
 
 # ============================================================
-# Menú de apartados (Plan anual)
+# Menú de apartados (Plan anual) - FILTRADO por MODULOS
 # ============================================================
-SECCIONES = [
+SECCIONES_TODAS = [
     "Encuesta de calidad",
     "Observación de clases",
     "Evaluación docente",
@@ -320,13 +396,34 @@ SECCIONES = [
     "Aulas virtuales",
 ]
 
-# Si venimos de un botón (placeholder), forzar selección
+# Filtrar secciones según permisos
+try:
+    if st.session_state.get("user_allow_all", False):
+        SECCIONES = SECCIONES_TODAS[:]
+    else:
+        permitted = st.session_state.get("user_modulos", set())
+        SECCIONES = [
+            s for s in SECCIONES_TODAS
+            if MOD_KEY_BY_SECCION.get(s, "") in permitted
+        ]
+
+    if not SECCIONES:
+        st.error("Tu usuario no tiene módulos habilitados. Revisa la columna MODULOS en ACCESOS.")
+        st.stop()
+except Exception as e:
+    st.error("Error al filtrar módulos por permisos.")
+    if DEBUG:
+        st.exception(e)
+    st.stop()
+
+# Si venimos de un botón (placeholder), forzar selección (solo si existe en SECCIONES)
 if "seccion_forzada" in st.session_state:
-    try:
-        idx_forzada = SECCIONES.index(st.session_state["seccion_forzada"])
-    except ValueError:
-        idx_forzada = 0
+    forced = st.session_state.get("seccion_forzada")
     st.session_state.pop("seccion_forzada", None)
+    if forced in SECCIONES:
+        idx_forzada = SECCIONES.index(forced)
+    else:
+        idx_forzada = 0
 else:
     idx_forzada = 0
 
@@ -343,6 +440,25 @@ except Exception as e:
     st.stop()
 
 st.divider()
+
+# ============================================================
+# Bloqueo duro: por si alguien intenta forzar estado previo
+# ============================================================
+try:
+    key = MOD_KEY_BY_SECCION.get(seccion, "")
+    if not key:
+        st.error("Sección inválida.")
+        st.stop()
+
+    if not st.session_state.get("user_allow_all", False):
+        if key not in st.session_state.get("user_modulos", set()):
+            st.error("Sin acceso a este módulo.")
+            st.stop()
+except Exception as e:
+    st.error("Error validando permisos del módulo.")
+    if DEBUG:
+        st.exception(e)
+    st.stop()
 
 # ============================================================
 # Router
@@ -364,7 +480,7 @@ try:
 
     elif seccion == "Índice de reprobación":
         st.subheader("Índice de reprobación")
-        indice_reprobacion.render_indice_reprobacion(vista=vista, carrera=carrera)  # ✅ NUEVO
+        indice_reprobacion.render_indice_reprobacion(vista=vista, carrera=carrera)
 
     elif seccion == "Titulación":
         _placeholder_en_construccion("Titulación")
