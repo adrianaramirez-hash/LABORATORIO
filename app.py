@@ -68,6 +68,16 @@ def _load_creds_dict() -> dict:
         return json.loads(raw)
     return dict(raw)
 
+def _norm_email(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    # Quita espacios invisibles comunes (Sheets/copy-paste)
+    s = s.replace("\u00A0", "")  # NBSP
+    s = s.replace("\u200B", "")  # zero-width space
+    s = s.replace(" ", "")       # espacios normales
+    return s.strip().lower()
+
 def _goto_seccion(nombre_seccion: str):
     st.session_state["seccion_forzada"] = nombre_seccion
     st.rerun()
@@ -105,6 +115,7 @@ def _placeholder_en_construccion(titulo: str):
 
     # Botones solo si el usuario tiene permitido ese módulo
     c1, c2, c3, c4 = st.columns(4)
+
     with c1:
         if _is_modulo_visible(MOD_KEY_BY_SECCION["Observación de clases"]):
             if st.button("🔎 Observación de clases", use_container_width=True, key=f"btn_oc_{titulo}"):
@@ -133,6 +144,9 @@ def _placeholder_en_construccion(titulo: str):
         else:
             st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, disabled=True, key=f"btn_av_dis_{titulo}")
 
+# ============================================================
+# Lectura de ACCESOS (cacheada, pero la forzamos a leer fresco al login con .clear())
+# ============================================================
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     creds_dict = _load_creds_dict()
@@ -184,7 +198,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
         if col not in df.columns:
             df[col] = ""
 
-    df["EMAIL"] = df["EMAIL"].astype(str).str.strip().str.lower()
+    df["EMAIL"] = df["EMAIL"].apply(_norm_email)
     df["ROL"] = df["ROL"].astype(str).str.strip().str.upper()
     df["SERVICIO_ASIGNADO"] = df["SERVICIO_ASIGNADO"].astype(str).str.strip()
     df["MODULOS"] = df["MODULOS"].astype(str).str.strip()
@@ -198,7 +212,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     return df, sa_email
 
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
-    email_norm = (email or "").strip().lower()
+    email_norm = _norm_email(email)
     if not email_norm:
         return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "Captura tu correo."}
 
@@ -222,7 +236,6 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     if rol == "DC" and not servicio:
         return {"ok": False, "rol": None, "servicio": None, "modulos": set(), "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
 
-    # Seguridad: si no tiene módulos asignados, no verá ninguno (debe venir ALL o lista)
     if not modulos:
         return {
             "ok": False,
@@ -276,14 +289,20 @@ else:
     email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
     if st.button("Entrar", use_container_width=True):
         try:
+            # ✅ FORZAR lectura actual: invalida cache antes de leer
+            cargar_accesos_df.clear()
+
             df_accesos, _ = cargar_accesos_df()
             res = resolver_permiso_por_email(email_input, df_accesos)
 
             if not res["ok"]:
                 st.error(res["mensaje"])
+                if DEBUG:
+                    st.write("Email capturado (normalizado):", _norm_email(email_input))
+                    st.write("Emails cargados (primeros 20):", df_accesos["EMAIL"].head(20).tolist())
                 st.stop()
 
-            st.session_state["user_email"] = (email_input or "").strip().lower()
+            st.session_state["user_email"] = _norm_email(email_input)
             st.session_state["user_rol"] = res["rol"]
             st.session_state["user_servicio"] = res["servicio"]
             st.session_state["user_modulos"] = res["modulos"]
@@ -396,7 +415,6 @@ SECCIONES_TODAS = [
     "Aulas virtuales",
 ]
 
-# Filtrar secciones según permisos
 try:
     if st.session_state.get("user_allow_all", False):
         SECCIONES = SECCIONES_TODAS[:]
@@ -420,10 +438,7 @@ except Exception as e:
 if "seccion_forzada" in st.session_state:
     forced = st.session_state.get("seccion_forzada")
     st.session_state.pop("seccion_forzada", None)
-    if forced in SECCIONES:
-        idx_forzada = SECCIONES.index(forced)
-    else:
-        idx_forzada = 0
+    idx_forzada = SECCIONES.index(forced) if forced in SECCIONES else 0
 else:
     idx_forzada = 0
 
