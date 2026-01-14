@@ -1,3 +1,4 @@
+# encuesta_calidad.py
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -31,8 +32,6 @@ MAX_VERTICAL_SECTIONS = 7
 
 SHEET_PROCESADO = "PROCESADO"
 SHEET_MAPA = "Mapa_Preguntas"
-SHEET_CATALOGO = "Catalogo_Servicio"
-
 
 # ============================================================
 # Helpers
@@ -42,7 +41,7 @@ def _section_from_numcol(col: str) -> str:
 
 
 def _wrap_text(s: str, width: int = 18, max_lines: int = 3) -> str:
-    if not s or pd.isna(s):
+    if s is None or pd.isna(s):
         return ""
     lines = textwrap.wrap(str(s), width=width)
     if len(lines) <= max_lines:
@@ -54,56 +53,6 @@ def _wrap_text(s: str, width: int = 18, max_lines: int = 3) -> str:
 
 def _mean_numeric(series: pd.Series):
     return pd.to_numeric(series, errors="coerce").mean()
-
-
-def _bar_chart_auto(
-    df_in: pd.DataFrame,
-    category_col: str,
-    value_col: str,
-    value_domain: list,
-    value_title: str,
-    tooltip_cols: list,
-    max_vertical: int,
-    wrap_width_vertical: int = 18,
-    wrap_width_horizontal: int = 30,
-    height_per_row: int = 28,
-    base_height: int = 260,
-    hide_category_labels: bool = True,
-):
-    if df_in.empty:
-        return None
-
-    df = df_in.copy()
-    n = len(df)
-
-    if n <= max_vertical:
-        df["_cat"] = df[category_col].apply(
-            lambda x: _wrap_text(x, wrap_width_vertical)
-        )
-        return (
-            alt.Chart(df)
-            .mark_bar()
-            .encode(
-                x=alt.X("_cat:N", sort="-y", axis=alt.Axis(labels=not hide_category_labels)),
-                y=alt.Y(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), title=value_title),
-                tooltip=tooltip_cols,
-            )
-            .properties(height=max(300, base_height))
-        )
-
-    df["_cat"] = df[category_col].apply(
-        lambda x: _wrap_text(x, wrap_width_horizontal)
-    )
-    return (
-        alt.Chart(df)
-        .mark_bar()
-        .encode(
-            y=alt.Y("_cat:N", sort="-x", axis=alt.Axis(labels=not hide_category_labels)),
-            x=alt.X(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), title=value_title),
-            tooltip=tooltip_cols,
-        )
-        .properties(height=max(base_height, n * height_per_row))
-    )
 
 
 def _auto_classify_numcols(df: pd.DataFrame, num_cols: list[str]):
@@ -127,6 +76,50 @@ def _best_carrera_col(df: pd.DataFrame):
     return None
 
 
+def _bar_chart_auto(
+    df_in,
+    category_col,
+    value_col,
+    value_domain,
+    value_title,
+    tooltip_cols,
+    max_vertical,
+    wrap_width_vertical=18,
+    wrap_width_horizontal=30,
+    base_height=320,
+):
+    if df_in.empty:
+        return None
+
+    df = df_in.copy()
+    n = len(df)
+
+    if n <= max_vertical:
+        df["_cat"] = df[category_col].apply(lambda x: _wrap_text(x, wrap_width_vertical))
+        return (
+            alt.Chart(df)
+            .mark_bar()
+            .encode(
+                x=alt.X("_cat:N", sort="-y", title=None),
+                y=alt.Y(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), title=value_title),
+                tooltip=tooltip_cols,
+            )
+            .properties(height=base_height)
+        )
+
+    df["_cat"] = df[category_col].apply(lambda x: _wrap_text(x, wrap_width_horizontal))
+    return (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("_cat:N", sort="-x", title=None),
+            x=alt.X(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), title=value_title),
+            tooltip=tooltip_cols,
+        )
+        .properties(height=max(base_height, n * 28))
+    )
+
+
 # ============================================================
 # Google Sheets
 # ============================================================
@@ -141,15 +134,13 @@ def _load_from_gsheets_by_url(url: str):
         data = ws.get_all_values()
         return pd.DataFrame(data[1:], columns=data[0]).replace("", pd.NA)
 
-    df = ws_to_df(SHEET_PROCESADO)
-    mapa = ws_to_df(SHEET_MAPA)
-    return df, mapa
+    return ws_to_df(SHEET_PROCESADO), ws_to_df(SHEET_MAPA)
 
 
 # ============================================================
 # Render principal
 # ============================================================
-def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None):
+def render_encuesta_calidad(vista=None, carrera=None):
     st.subheader("Encuesta de calidad")
     vista = vista or "Dirección General"
 
@@ -163,6 +154,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         "Escolarizado / Ejecutivas": "EC_ESCOLAR_URL",
         "Preparatoria": "EC_PREPA_URL",
     }
+
     url = st.secrets[URL_KEYS[modalidad]]
 
     with st.spinner("Cargando datos…"):
@@ -178,91 +170,104 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     carrera_col = _best_carrera_col(df)
 
     # ============================================================
-    # Tabs
+    # TABS
     # ============================================================
     tab1, tab2, tab3, tab4 = st.tabs(
         ["Resumen", "Por sección", "Comentarios", "Comparativo entre carreras"]
     )
 
     # ============================================================
-    # TAB 4 – COMPARATIVO
+    # TAB 1 – RESUMEN (ORIGINAL)
+    # ============================================================
+    with tab1:
+        st.markdown("### Resumen general")
+        if likert_cols:
+            prom = pd.to_numeric(df[likert_cols].stack(), errors="coerce").mean()
+            st.metric("Promedio global (Likert)", f"{prom:.2f}")
+        if yesno_cols:
+            pct = pd.to_numeric(df[yesno_cols].stack(), errors="coerce").mean() * 100
+            st.metric("% Sí (Sí/No)", f"{pct:.1f}%")
+
+    # ============================================================
+    # TAB 2 – POR SECCIÓN (ORIGINAL)
+    # ============================================================
+    with tab2:
+        st.markdown("### Promedio por sección")
+        rows = []
+        for (sc, sn), g in mapa_ok.groupby(["section_code", "section_name"]):
+            cols = [c for c in g["header_num"] if c in likert_cols]
+            if not cols:
+                continue
+            val = pd.to_numeric(df[cols].stack(), errors="coerce").mean()
+            if pd.notna(val):
+                rows.append({"Sección": sn, "Promedio": val})
+
+        sec_df = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
+        st.dataframe(sec_df, use_container_width=True)
+
+    # ============================================================
+    # TAB 3 – COMENTARIOS (ORIGINAL)
+    # ============================================================
+    with tab3:
+        open_cols = [
+            c for c in df.columns
+            if not c.endswith("_num")
+            and any(k in c.lower() for k in ["coment", "suger", "por qué", "porque"])
+        ]
+        if not open_cols:
+            st.info("No se detectaron comentarios.")
+        else:
+            sel = st.selectbox("Campo de comentarios", open_cols)
+            st.dataframe(df[[sel]].dropna(), use_container_width=True)
+
+    # ============================================================
+    # TAB 4 – COMPARATIVO ENTRE CARRERAS (NUEVO)
     # ============================================================
     with tab4:
         if vista != "Dirección General":
-            st.info("Este comparativo solo está disponible para Dirección General.")
+            st.info("Vista disponible solo para Dirección General.")
             return
 
         st.markdown("### Comparativo entre carreras")
 
-        sections = (
+        secciones = (
             mapa_ok[mapa_ok["header_num"].isin(likert_cols)]
             .groupby("section_name")
             .size()
-            .sort_index()
             .index.tolist()
         )
 
-        if not sections:
-            st.warning("No hay secciones Likert disponibles.")
-            return
+        sec_sel = st.selectbox("Selecciona la sección", secciones)
 
-        sec_sel = st.selectbox("Selecciona la sección a comparar", sections)
-
-        sec_map = mapa_ok[
+        sec_cols = mapa_ok[
             (mapa_ok["section_name"] == sec_sel)
             & (mapa_ok["header_num"].isin(likert_cols))
-        ]
-
-        carreras = (
-            df[carrera_col]
-            .dropna()
-            .astype(str)
-            .str.strip()
-            .unique()
-            .tolist()
-        )
+        ]["header_num"].tolist()
 
         rows = []
-        for car in carreras:
-            f = df[df[carrera_col].astype(str).str.strip() == car]
-            cols = sec_map["header_num"].tolist()
-            if not cols:
-                continue
-            val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
-            if pd.isna(val):
-                continue
-            rows.append(
-                {
-                    "Carrera/Servicio": car,
-                    "Promedio": float(val),
-                    "Preguntas": len(cols),
-                }
-            )
-
-        if not rows:
-            st.info("No hay datos suficientes para esta sección.")
-            return
+        for car in df[carrera_col].dropna().unique():
+            f = df[df[carrera_col] == car]
+            val = pd.to_numeric(f[sec_cols].stack(), errors="coerce").mean()
+            if pd.notna(val):
+                rows.append({
+                    "Carrera": car,
+                    "Promedio": val,
+                    "Preguntas": len(sec_cols),
+                })
 
         comp_df = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
 
         st.dataframe(comp_df, use_container_width=True)
 
         chart = _bar_chart_auto(
-            df_in=comp_df,
-            category_col="Carrera/Servicio",
-            value_col="Promedio",
-            value_domain=[1, 5],
-            value_title="Promedio",
-            tooltip_cols=[
-                "Carrera/Servicio",
-                alt.Tooltip("Promedio:Q", format=".2f"),
-                "Preguntas",
-            ],
-            max_vertical=MAX_VERTICAL_SECTIONS,
-            wrap_width_vertical=22,
-            wrap_width_horizontal=36,
-            base_height=340,
+            comp_df,
+            "Carrera",
+            "Promedio",
+            [1, 5],
+            "Promedio",
+            ["Carrera", alt.Tooltip("Promedio:Q", format=".2f"), "Preguntas"],
+            MAX_VERTICAL_SECTIONS,
         )
 
-        if chart is not None:
+        if chart:
             st.altair_chart(chart, use_container_width=True)
