@@ -458,9 +458,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     # ---------------------------
     # Tabs
     # ---------------------------
-    tab1, tab2, tab3, tab4 = st.tabs(
-    ["Resumen", "Por sección", "Comentarios", "Comparativo entre carreras"]
-)
+    tab1, tab2, tab3 = st.tabs(["Resumen", "Por sección", "Comentarios"])
 
     # ---------------------------
     # Resumen
@@ -672,80 +670,3 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
 
         st.caption(f"Entradas con texto: {len(textos)}")
         st.dataframe(pd.DataFrame({col_sel: textos}), use_container_width=True)
-
-# ============================================================
-# TAB 4 – COMPARATIVO ENTRE CARRERAS (SOLO TABLA)
-# ============================================================
-with tab4:
-    if vista != "Dirección General":
-        st.info("Este comparativo solo está disponible para Dirección General.")
-    else:
-        st.markdown("### Comparativo entre carreras")
-
-        # Secciones disponibles (solo Likert)
-        secciones = (
-            mapa_ok[mapa_ok["header_num"].isin(likert_cols)]
-            .groupby("section_name")
-            .size()
-            .index.tolist()
-        )
-
-        if not secciones:
-            st.warning("No hay secciones Likert disponibles.")
-        else:
-            sec_sel = st.selectbox("Selecciona la sección a comparar", secciones)
-
-            # Columnas numéricas de la sección seleccionada
-            sec_cols = mapa_ok[
-                (mapa_ok["section_name"] == sec_sel)
-                & (mapa_ok["header_num"].isin(likert_cols))
-            ]["header_num"].tolist()
-
-            # Detectar columna de carrera/servicio
-            carrera_col = next(
-                (
-                    c for c in [
-                        "Carrera_Catalogo",
-                        "Servicio",
-                        "Selecciona el programa académico que estudias",
-                        "Programa",
-                        "Carrera",
-                    ]
-                    if c in df.columns
-                ),
-                None,
-            )
-
-            if not carrera_col:
-                st.warning("No se encontró una columna válida de carrera/servicio.")
-            else:
-                rows = []
-
-                for car in sorted(df[carrera_col].dropna().astype(str).unique()):
-                    f_car = f[f[carrera_col].astype(str) == car]
-
-                    if f_car.empty:
-                        continue
-
-                    val = pd.to_numeric(
-                        f_car[sec_cols].stack(), errors="coerce"
-                    ).mean()
-
-                    if pd.notna(val):
-                        rows.append({
-                            "Carrera / Servicio": car,
-                            "Promedio sección": round(val, 2),
-                            "Preguntas": len(sec_cols),
-                        })
-
-                if not rows:
-                    st.info("No hay datos suficientes para esta sección con los filtros actuales.")
-                else:
-                    comp_df = (
-                        pd.DataFrame(rows)
-                        .sort_values("Promedio sección", ascending=False)
-                        .reset_index(drop=True)
-                    )
-
-                    st.dataframe(comp_df, use_container_width=True)
-
