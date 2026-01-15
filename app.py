@@ -56,17 +56,20 @@ def _extract_sheet_id(url: str) -> str:
         raise ValueError("No pude extraer el ID del Google Sheet desde la URL.")
     return m.group(1)
 
+
 def _first_nonempty_row_index(values: list[list[str]]) -> int:
     for i, row in enumerate(values):
         if any(str(c).strip() for c in row):
             return i
     return 0
 
+
 def _load_creds_dict() -> dict:
     raw = st.secrets["gcp_service_account_json"]
     if isinstance(raw, str):
         return json.loads(raw)
     return dict(raw)
+
 
 def _norm_email(s: str) -> str:
     if s is None:
@@ -77,6 +80,7 @@ def _norm_email(s: str) -> str:
     s = s.replace("\u200B", "")  # zero-width space
     s = s.replace(" ", "")       # espacios normales
     return s.strip().lower()
+
 
 def _parse_servicios_cell(cell: str) -> list[str]:
     """
@@ -91,9 +95,11 @@ def _parse_servicios_cell(cell: str) -> list[str]:
     parts = re.split(r"[,\|]", txt)
     return [p.strip() for p in parts if p.strip()]
 
+
 def _goto_seccion(nombre_seccion: str):
     st.session_state["seccion_forzada"] = nombre_seccion
     st.rerun()
+
 
 def _parse_modulos_cell(modulos_cell: str) -> set[str]:
     """
@@ -112,12 +118,14 @@ def _parse_modulos_cell(modulos_cell: str) -> set[str]:
     parts = [p.strip() for p in txt.split(",") if p.strip()]
     return set(parts)
 
+
 def _is_modulo_visible(mod_key: str) -> bool:
     permitted = st.session_state.get("user_modulos", set())
     allow_all = st.session_state.get("user_allow_all", False)
     if allow_all:
         return True
     return mod_key in permitted
+
 
 def _placeholder_en_construccion(titulo: str):
     st.subheader(titulo)
@@ -156,13 +164,13 @@ def _placeholder_en_construccion(titulo: str):
         else:
             st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, disabled=True, key=f"btn_av_dis_{titulo}")
 
+
 def _get_logged_in_email() -> str:
     """
     Obtiene el email desde st.user (OIDC).
     Se mantiene defensivo por si cambian atributos disponibles.
     """
     try:
-        # Streamlit suele exponer st.user.email con Google, pero no lo asumimos.
         email = getattr(st.user, "email", None)
         if email:
             return _norm_email(email)
@@ -170,6 +178,7 @@ def _get_logged_in_email() -> str:
         return _norm_email(d.get("email") or d.get("mail") or d.get("preferred_username") or "")
     except Exception:
         return ""
+
 
 # ============================================================
 # Lectura de ACCESOS (cacheada, pero forzamos lectura fresca al login con .clear())
@@ -238,10 +247,17 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 
     return df, sa_email
 
+
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     email_norm = _norm_email(email)
     if not email_norm:
-        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "No fue posible obtener el correo del usuario autenticado."}
+        return {
+            "ok": False,
+            "rol": None,
+            "servicios": [],
+            "modulos": set(),
+            "mensaje": "No fue posible obtener el correo del usuario autenticado.",
+        }
 
     fila = df_accesos[df_accesos["EMAIL"] == email_norm]
     if fila.empty:
@@ -280,6 +296,7 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
         "mensaje": "OK",
     }
 
+
 # ============================================================
 # Header (logo + título)
 # ============================================================
@@ -303,7 +320,6 @@ st.divider()
 # ============================================================
 st.subheader("Acceso")
 
-# 1) Si no está autenticado con Google, iniciar flujo
 try:
     is_logged_in = bool(getattr(st.user, "is_logged_in", False))
 except Exception:
@@ -312,25 +328,20 @@ except Exception:
 if not is_logged_in:
     st.info("Inicia sesión con Google para acceder a la plataforma.")
     if st.button("Iniciar sesión con Google", use_container_width=True):
-        # Provider name = "google" (definido en Secrets: [auth.google])
         st.login("google")
     st.stop()
 
-# 2) Ya autenticado: obtener email y validar contra ACCESOS (solo una vez por sesión)
 if "user_rol" not in st.session_state:
     user_email = _get_logged_in_email()
 
     try:
-        # ✅ Forzar lectura actual de ACCESOS al momento de validar
         cargar_accesos_df.clear()
-
         df_accesos, _ = cargar_accesos_df()
         res = resolver_permiso_por_email(user_email, df_accesos)
 
         if not res["ok"]:
             st.error(res["mensaje"])
             st.caption(f"Correo autenticado: {user_email or '(no disponible)'}")
-            # Permitir salir del login OIDC
             if st.button("Cerrar sesión", use_container_width=True):
                 try:
                     st.logout()
@@ -343,6 +354,7 @@ if "user_rol" not in st.session_state:
                     "user_modulos",
                     "user_allow_all",
                     "carrera_seleccionada_dc",
+                    "seccion_forzada",
                 ]:
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -371,13 +383,11 @@ if "user_rol" not in st.session_state:
                 st.write(str(e))
         st.stop()
 
-# 3) Sesión activa (mostrar estado + botón salir)
 c1, c2 = st.columns([4, 1], vertical_alignment="center")
 with c1:
     st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
 with c2:
     if st.button("Salir", use_container_width=True):
-        # Logout OIDC + limpiar permisos locales
         try:
             st.logout()
         except Exception:
@@ -389,6 +399,7 @@ with c2:
             "user_modulos",
             "user_allow_all",
             "carrera_seleccionada_dc",
+            "seccion_forzada",
         ]:
             st.session_state.pop(k, None)
         st.rerun()
@@ -498,10 +509,7 @@ try:
         SECCIONES = SECCIONES_TODAS[:]
     else:
         permitted = st.session_state.get("user_modulos", set())
-        SECCIONES = [
-            s for s in SECCIONES_TODAS
-            if MOD_KEY_BY_SECCION.get(s, "") in permitted
-        ]
+        SECCIONES = [s for s in SECCIONES_TODAS if MOD_KEY_BY_SECCION.get(s, "") in permitted]
 
     if not SECCIONES:
         st.error("Tu usuario no tiene módulos habilitados. Revisa la columna MODULOS en ACCESOS.")
@@ -553,15 +561,13 @@ except Exception as e:
     st.stop()
 
 # ============================================================
-# Router
+# Router (AJUSTADO: sin subheaders duplicados)
 # ============================================================
 try:
     if seccion == "Encuesta de calidad":
-        st.subheader("Encuesta de calidad")
         encuesta_calidad.render_encuesta_calidad(vista=vista, carrera=carrera)
 
     elif seccion == "Observación de clases":
-        st.subheader("Observación de clases")
         observacion_clases.render_observacion_clases(vista=vista, carrera=carrera)
 
     elif seccion == "Evaluación docente":
@@ -571,7 +577,6 @@ try:
         _placeholder_en_construccion("Capacitaciones")
 
     elif seccion == "Índice de reprobación":
-        st.subheader("Índice de reprobación")
         indice_reprobacion.render_indice_reprobacion(vista=vista, carrera=carrera)
 
     elif seccion == "Titulación":
@@ -581,7 +586,6 @@ try:
         _placeholder_en_construccion("Ceneval")
 
     elif seccion == "Exámenes departamentales":
-        st.subheader("Exámenes departamentales")
         render_examenes_departamentales(
             "https://docs.google.com/spreadsheets/d/1GqlE9SOkSNCdA9mi65hk45uuLAao8GHHoresiyhRfQU/edit",
             vista=vista,
@@ -589,7 +593,6 @@ try:
         )
 
     elif seccion == "Aulas virtuales":
-        st.subheader("Aulas virtuales")
         aulas_virtuales.mostrar(vista=vista, carrera=carrera)
 
     else:
