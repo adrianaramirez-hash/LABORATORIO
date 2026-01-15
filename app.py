@@ -82,7 +82,6 @@ def _parse_servicios_cell(cell: str) -> list[str]:
     """
     Permite múltiples servicios/carreras en SERVICIO_ASIGNADO:
       - Separadores: coma (,) o pipe (|)
-      - Respeta el texto tal cual (no mapea nombres)
     """
     if cell is None:
         return []
@@ -127,7 +126,6 @@ def _placeholder_en_construccion(titulo: str):
 
     st.markdown("**Módulos disponibles:**")
 
-    # Botones solo si el usuario tiene permitido ese módulo
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
@@ -157,6 +155,21 @@ def _placeholder_en_construccion(titulo: str):
                 _goto_seccion("Aulas virtuales")
         else:
             st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, disabled=True, key=f"btn_av_dis_{titulo}")
+
+def _get_logged_in_email() -> str:
+    """
+    Obtiene el email desde st.user (OIDC).
+    Se mantiene defensivo por si cambian atributos disponibles.
+    """
+    try:
+        # Streamlit suele exponer st.user.email con Google, pero no lo asumimos.
+        email = getattr(st.user, "email", None)
+        if email:
+            return _norm_email(email)
+        d = st.user.to_dict() if hasattr(st.user, "to_dict") else {}
+        return _norm_email(d.get("email") or d.get("mail") or d.get("preferred_username") or "")
+    except Exception:
+        return ""
 
 # ============================================================
 # Lectura de ACCESOS (cacheada, pero forzamos lectura fresca al login con .clear())
@@ -228,7 +241,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     email_norm = _norm_email(email)
     if not email_norm:
-        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "Captura tu correo."}
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "No fue posible obtener el correo del usuario autenticado."}
 
     fila = df_accesos[df_accesos["EMAIL"] == email_norm]
     if fila.empty:
@@ -237,7 +250,7 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
             "rol": None,
             "servicios": [],
             "modulos": set(),
-            "mensaje": "Acceso no encontrado o inactivo. Verifica tu correo en ACCESOS.",
+            "mensaje": "Tu correo autenticado no está habilitado en ACCESOS (o está inactivo).",
         }
 
     rol = str(fila.iloc[0]["ROL"]).strip().upper()
@@ -286,74 +299,104 @@ except Exception as e:
 st.divider()
 
 # ============================================================
-# LOGIN / ACCESO
+# LOGIN / ACCESO (OIDC Google con st.login)
 # ============================================================
 st.subheader("Acceso")
 
-if "user_rol" in st.session_state:
-    c1, c2 = st.columns([4, 1], vertical_alignment="center")
-    with c1:
-        st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
-    with c2:
-        if st.button("Salir", use_container_width=True):
-            for k in [
-                "user_email",
-                "user_rol",
-                "user_servicios",
-                "user_modulos",
-                "user_allow_all",
-                "carrera_seleccionada_dc",
-            ]:
-                st.session_state.pop(k, None)
-            st.rerun()
-else:
-    email_input = st.text_input("Correo institucional:", value=st.session_state.get("user_email", ""))
-    if st.button("Entrar", use_container_width=True):
-        try:
-            # ✅ Forzar lectura actual: invalida cache antes de leer
-            cargar_accesos_df.clear()
+# 1) Si no está autenticado con Google, iniciar flujo
+try:
+    is_logged_in = bool(getattr(st.user, "is_logged_in", False))
+except Exception:
+    is_logged_in = False
 
-            df_accesos, _ = cargar_accesos_df()
-            res = resolver_permiso_por_email(email_input, df_accesos)
+if not is_logged_in:
+    st.info("Inicia sesión con Google para acceder a la plataforma.")
+    if st.button("Iniciar sesión con Google", use_container_width=True):
+        # Provider name = "google" (definido en Secrets: [auth.google])
+        st.login("google")
+    st.stop()
 
-            if not res["ok"]:
-                st.error(res["mensaje"])
-                if DEBUG:
-                    st.write("Email capturado (normalizado):", _norm_email(email_input))
-                    st.write("Emails cargados (primeros 20):", df_accesos["EMAIL"].head(20).tolist())
-                st.stop()
+# 2) Ya autenticado: obtener email y validar contra ACCESOS (solo una vez por sesión)
+if "user_rol" not in st.session_state:
+    user_email = _get_logged_in_email()
 
-            st.session_state["user_email"] = _norm_email(email_input)
-            st.session_state["user_rol"] = res["rol"]
-            st.session_state["user_servicios"] = res["servicios"]  # ✅ ahora lista
-            st.session_state["user_modulos"] = res["modulos"]
-            st.session_state["user_allow_all"] = ("ALL" in res["modulos"])
-            st.session_state.pop("carrera_seleccionada_dc", None)  # reinicia selección al entrar
-            st.rerun()
+    try:
+        # ✅ Forzar lectura actual de ACCESOS al momento de validar
+        cargar_accesos_df.clear()
 
-        except Exception as e:
-            st.error("No fue posible validar el acceso. Revisa permisos del Google Sheet de ACCESOS.")
-            try:
-                sa_email = _load_creds_dict().get("client_email", "")
-            except Exception:
-                sa_email = ""
-            if sa_email:
-                st.info(f"Comparte el Sheet de ACCESOS con este correo (Viewer): {sa_email}")
+        df_accesos, _ = cargar_accesos_df()
+        res = resolver_permiso_por_email(user_email, df_accesos)
 
-            if DEBUG:
-                st.exception(e)
-            else:
-                with st.expander("Ver detalle técnico (para diagnóstico)"):
-                    st.write(str(e))
+        if not res["ok"]:
+            st.error(res["mensaje"])
+            st.caption(f"Correo autenticado: {user_email or '(no disponible)'}")
+            # Permitir salir del login OIDC
+            if st.button("Cerrar sesión", use_container_width=True):
+                try:
+                    st.logout()
+                except Exception:
+                    pass
+                for k in [
+                    "user_email",
+                    "user_rol",
+                    "user_servicios",
+                    "user_modulos",
+                    "user_allow_all",
+                    "carrera_seleccionada_dc",
+                ]:
+                    st.session_state.pop(k, None)
+                st.rerun()
             st.stop()
 
-if "user_rol" not in st.session_state:
-    st.stop()
+        st.session_state["user_email"] = user_email
+        st.session_state["user_rol"] = res["rol"]
+        st.session_state["user_servicios"] = res["servicios"]
+        st.session_state["user_modulos"] = res["modulos"]
+        st.session_state["user_allow_all"] = ("ALL" in res["modulos"])
+        st.session_state.pop("carrera_seleccionada_dc", None)
+
+    except Exception as e:
+        st.error("No fue posible validar el acceso en ACCESOS. Revisa permisos del Google Sheet.")
+        try:
+            sa_email = _load_creds_dict().get("client_email", "")
+        except Exception:
+            sa_email = ""
+        if sa_email:
+            st.info(f"Comparte el Sheet de ACCESOS con este correo (Viewer): {sa_email}")
+
+        if DEBUG:
+            st.exception(e)
+        else:
+            with st.expander("Ver detalle técnico (para diagnóstico)"):
+                st.write(str(e))
+        st.stop()
+
+# 3) Sesión activa (mostrar estado + botón salir)
+c1, c2 = st.columns([4, 1], vertical_alignment="center")
+with c1:
+    st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
+with c2:
+    if st.button("Salir", use_container_width=True):
+        # Logout OIDC + limpiar permisos locales
+        try:
+            st.logout()
+        except Exception:
+            pass
+        for k in [
+            "user_email",
+            "user_rol",
+            "user_servicios",
+            "user_modulos",
+            "user_allow_all",
+            "carrera_seleccionada_dc",
+        ]:
+            st.session_state.pop(k, None)
+        st.rerun()
 
 st.divider()
 
 # ============================================================
-# Catálogo de carreras (solo para DG; para DC ahora usa su lista)
+# Catálogo de carreras (solo para DG; para DC usa su lista)
 # ============================================================
 CATALOGO_CARRERAS = [
     "Preparatoria",
@@ -412,7 +455,6 @@ try:
         sel = st.selectbox("Servicio / carrera:", opciones, index=0)
         carrera = None if sel == "Todos" else sel
     else:
-        # ✅ DC con 1 o múltiples carreras
         if isinstance(SERVICIOS_DC, str):
             SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
 
@@ -420,7 +462,6 @@ try:
             carrera = SERVICIOS_DC[0]
             st.info(f"Acceso limitado a: **{carrera}**")
         else:
-            # Persistir selección
             default_idx = 0
             prev = st.session_state.get("carrera_seleccionada_dc")
             if prev and prev in SERVICIOS_DC:
@@ -471,7 +512,6 @@ except Exception as e:
         st.exception(e)
     st.stop()
 
-# Si venimos de un botón (placeholder), forzar selección (solo si existe en SECCIONES)
 if "seccion_forzada" in st.session_state:
     forced = st.session_state.get("seccion_forzada")
     st.session_state.pop("seccion_forzada", None)
