@@ -75,10 +75,9 @@ def _norm_email(s: str) -> str:
     if s is None:
         return ""
     s = str(s)
-    # Quita espacios invisibles comunes (Sheets/copy-paste)
     s = s.replace("\u00A0", "")  # NBSP
     s = s.replace("\u200B", "")  # zero-width space
-    s = s.replace(" ", "")       # espacios normales
+    s = s.replace(" ", "")
     return s.strip().lower()
 
 
@@ -251,13 +250,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     email_norm = _norm_email(email)
     if not email_norm:
-        return {
-            "ok": False,
-            "rol": None,
-            "servicios": [],
-            "modulos": set(),
-            "mensaje": "No fue posible obtener el correo del usuario autenticado.",
-        }
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "No fue posible obtener el correo del usuario autenticado."}
 
     fila = df_accesos[df_accesos["EMAIL"] == email_norm]
     if fila.empty:
@@ -331,6 +324,7 @@ if not is_logged_in:
         st.login("google")
     st.stop()
 
+# 2) Ya autenticado: obtener email y validar contra ACCESOS (solo una vez por sesión)
 if "user_rol" not in st.session_state:
     user_email = _get_logged_in_email()
 
@@ -342,6 +336,7 @@ if "user_rol" not in st.session_state:
         if not res["ok"]:
             st.error(res["mensaje"])
             st.caption(f"Correo autenticado: {user_email or '(no disponible)'}")
+
             if st.button("Cerrar sesión", use_container_width=True):
                 try:
                     st.logout()
@@ -354,7 +349,6 @@ if "user_rol" not in st.session_state:
                     "user_modulos",
                     "user_allow_all",
                     "carrera_seleccionada_dc",
-                    "seccion_forzada",
                 ]:
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -383,6 +377,7 @@ if "user_rol" not in st.session_state:
                 st.write(str(e))
         st.stop()
 
+# 3) Sesión activa (mostrar estado + botón salir)
 c1, c2 = st.columns([4, 1], vertical_alignment="center")
 with c1:
     st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
@@ -399,7 +394,6 @@ with c2:
             "user_modulos",
             "user_allow_all",
             "carrera_seleccionada_dc",
-            "seccion_forzada",
         ]:
             st.session_state.pop(k, None)
         st.rerun()
@@ -407,85 +401,34 @@ with c2:
 st.divider()
 
 # ============================================================
-# Catálogo de carreras (solo para DG; para DC usa su lista)
+# Contexto de usuario (DG vs DC)
 # ============================================================
-CATALOGO_CARRERAS = [
-    "Preparatoria",
-    "Actuación",
-    "Administración de empresas",
-    "Cine y TV Digital",
-    "Comunicación Multimedia",
-    "Contaduría",
-    "Creación y Gestión de Empresas Turísticas",
-    "Derecho",
-    "Diseño de Modas",
-    "Diseño Gráfico",
-    "Finanzas",
-    "Gastronomía",
-    "Mercadotecnia",
-    "Nutrición",
-    "Pedagogía",
-    "Psicología",
-    "Tecnologías de la Información",
-    "Licenciatura Ejecutiva: Administración de Empresas",
-    "Licenciatura Ejecutiva: Contaduría",
-    "Licenciatura Ejecutiva: Derecho",
-    "Licenciatura Ejecutiva: Informática",
-    "Licenciatura Ejecutiva: Mercadotecnia",
-    "Licenciatura Ejecutiva: Pedagogía",
-    "Maestría en Administración de Negocios (MBA)",
-    "Maestría en Derecho Corporativo",
-    "Maestría en Desarrollo del Potencial Humano y Organizacional (Coaching)",
-    "Maestría en Odontología Legal y Forense",
-    "Maestría en Psicoterapia Familiar",
-    "Maestría en Psicoterapia Psicoanalítica",
-    "Maestría en Administración de Recursos Humanos",
-    "Maestría en Finanzas",
-    "Maestría en Educación Especial",
-    "Maestría: Dirección de Recursos Humanos",
-    "Maestría: Finanzas",
-    "Maestría: Gestión de Tecnologías de la Información",
-    "Maestría: Docencia",
-    "Maestría: Educación Especial",
-    "Maestría: Entrenamiento Deportivo",
-    "Maestría: Tecnología e Innovación Educativa",
-    "Licenciatura Entrenamiento Deportivo",
-    "EDUCON",
-    "Centro de Idiomas",
-]
-
 ROL = st.session_state["user_rol"]
 SERVICIOS_DC = st.session_state.get("user_servicios") or []
 
 vista = "Dirección General" if ROL == "DG" else "Director de carrera"
 
-carrera = None
-try:
-    if ROL == "DG":
-        opciones = ["Todos"] + CATALOGO_CARRERAS
-        sel = st.selectbox("Servicio / carrera:", opciones, index=0)
-        carrera = None if sel == "Todos" else sel
+# DG: siempre entra con TODO; filtros por carrera se hacen dentro de cada módulo
+if ROL == "DG":
+    carrera = None
+    st.info("Vista Dirección General: los filtros por carrera/servicio se aplican dentro de cada módulo.")
+else:
+    # DC: acceso limitado a sus servicios
+    if isinstance(SERVICIOS_DC, str):
+        SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
+
+    if len(SERVICIOS_DC) == 1:
+        carrera = SERVICIOS_DC[0]
+        st.info(f"Acceso limitado a: **{carrera}**")
     else:
-        if isinstance(SERVICIOS_DC, str):
-            SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
+        default_idx = 0
+        prev = st.session_state.get("carrera_seleccionada_dc")
+        if prev and prev in SERVICIOS_DC:
+            default_idx = SERVICIOS_DC.index(prev)
 
-        if len(SERVICIOS_DC) == 1:
-            carrera = SERVICIOS_DC[0]
-            st.info(f"Acceso limitado a: **{carrera}**")
-        else:
-            default_idx = 0
-            prev = st.session_state.get("carrera_seleccionada_dc")
-            if prev and prev in SERVICIOS_DC:
-                default_idx = SERVICIOS_DC.index(prev)
-
-            carrera = st.selectbox("Selecciona el servicio/carrera:", SERVICIOS_DC, index=default_idx)
-            st.session_state["carrera_seleccionada_dc"] = carrera
-            st.caption("Acceso limitado a tus servicios asignados.")
-except Exception as e:
-    st.error("Error configurando acceso por rol.")
-    if DEBUG:
-        st.exception(e)
-    st.stop()
+        carrera = st.selectbox("Selecciona el servicio/carrera:", SERVICIOS_DC, index=default_idx)
+        st.session_state["carrera_seleccionada_dc"] = carrera
+        st.caption("Acceso limitado a tus servicios asignados.")
 
 st.divider()
 
@@ -561,7 +504,7 @@ except Exception as e:
     st.stop()
 
 # ============================================================
-# Router (AJUSTADO: sin subheaders duplicados)
+# Router
 # ============================================================
 try:
     if seccion == "Encuesta de calidad":
