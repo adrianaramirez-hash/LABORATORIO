@@ -411,9 +411,7 @@ vista = "Dirección General" if ROL == "DG" else "Director de carrera"
 # DG: siempre entra con TODO; filtros por carrera se hacen dentro de cada módulo
 if ROL == "DG":
     carrera = None
-    st.info("Vista Dirección General: los filtros por carrera/servicio se aplican dentro de cada módulo.")
 else:
-    # DC: acceso limitado a sus servicios
     if isinstance(SERVICIOS_DC, str):
         SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
 
