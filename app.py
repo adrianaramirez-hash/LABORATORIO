@@ -179,6 +179,14 @@ def _get_logged_in_email() -> str:
         return ""
 
 
+def _show_traceback_expander(title: str = "Ver detalle técnico (diagnóstico)"):
+    """Muestra el traceback completo en un expander (sin depender de DEBUG)."""
+    import traceback
+
+    with st.expander(title):
+        st.code(traceback.format_exc())
+
+
 # ============================================================
 # Lectura de ACCESOS (cacheada, pero forzamos lectura fresca al login con .clear())
 # ============================================================
@@ -373,8 +381,7 @@ if "user_rol" not in st.session_state:
         if DEBUG:
             st.exception(e)
         else:
-            with st.expander("Ver detalle técnico (para diagnóstico)"):
-                st.write(str(e))
+            _show_traceback_expander()
         st.stop()
 
 # 3) Sesión activa (mostrar estado + botón salir)
@@ -428,6 +435,10 @@ else:
         st.session_state["carrera_seleccionada_dc"] = carrera
         st.caption("Acceso limitado a tus servicios asignados.")
 
+# Normalización defensiva (evita espacios invisibles)
+if isinstance(carrera, str):
+    carrera = carrera.strip()
+
 st.divider()
 
 # ============================================================
@@ -459,6 +470,8 @@ except Exception as e:
     st.error("Error al filtrar módulos por permisos.")
     if DEBUG:
         st.exception(e)
+    else:
+        _show_traceback_expander()
     st.stop()
 
 if "seccion_forzada" in st.session_state:
@@ -478,6 +491,8 @@ except Exception as e:
     st.error("Error creando selector de apartado.")
     if DEBUG:
         st.exception(e)
+    else:
+        _show_traceback_expander()
     st.stop()
 
 st.divider()
@@ -499,6 +514,8 @@ except Exception as e:
     st.error("Error validando permisos del módulo.")
     if DEBUG:
         st.exception(e)
+    else:
+        _show_traceback_expander()
     st.stop()
 
 # ============================================================
@@ -534,7 +551,16 @@ try:
         )
 
     elif seccion == "Aulas virtuales":
-        aulas_virtuales.mostrar(vista=vista, carrera=carrera)
+        # Diagnóstico específico: evita que se quede en el mensaje genérico
+        try:
+            aulas_virtuales.mostrar(vista=vista, carrera=carrera)
+        except Exception as e:
+            st.error("Error al cargar Aulas virtuales.")
+            if DEBUG:
+                st.exception(e)
+            else:
+                _show_traceback_expander("Detalle técnico Aulas virtuales (diagnóstico)")
+            st.stop()
 
     else:
         st.subheader("Panel inicial")
@@ -546,4 +572,6 @@ except Exception as e:
     st.error("Ocurrió un error al cargar el apartado seleccionado.")
     if DEBUG:
         st.exception(e)
+    else:
+        _show_traceback_expander()
     st.stop()
