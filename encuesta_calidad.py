@@ -458,7 +458,15 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     # ---------------------------
     # Tabs
     # ---------------------------
-    tab1, tab2, tab3 = st.tabs(["Resumen", "Por sección", "Comentarios"])
+    if vista == "Dirección General":
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Resumen", "Por sección", "Comparativo entre carreras", "Comentarios"]
+    )
+else:
+    tab1, tab2, tab3 = st.tabs(
+        ["Resumen", "Por sección", "Comentarios"]
+    )
+
 
     # ---------------------------
     # Resumen
@@ -650,6 +658,56 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     # ---------------------------
     # Comentarios
     # ---------------------------
+
+    # ---------------------------
+# Comparativo entre carreras (solo Dirección General)
+# ---------------------------
+if vista == "Dirección General":
+    with tab4:
+        st.markdown("### Comparativo entre carreras por sección")
+        st.caption(
+            "Se muestran promedios Likert (1–5) por sección, comparando todas las carreras "
+            "de la modalidad seleccionada."
+        )
+
+        carrera_col = _best_carrera_col(f)
+        if not carrera_col:
+            st.warning("No se encontró una columna válida para identificar la carrera.")
+            st.stop()
+
+        for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
+            # Columnas Likert de esta sección
+            cols = [
+                c for c in g["header_num"].tolist()
+                if c in f.columns and c in likert_cols
+            ]
+            if not cols:
+                continue
+
+            rows = []
+            for carrera_val, df_c in f.groupby(carrera_col):
+                vals = pd.to_numeric(df_c[cols].stack(), errors="coerce")
+                mean_val = vals.mean()
+                if pd.isna(mean_val):
+                    continue
+
+                rows.append({
+                    "Carrera": str(carrera_val),
+                    "Promedio": float(mean_val),
+                    "Respuestas": len(df_c)
+                })
+
+            if not rows:
+                continue
+
+            sec_df = (
+                pd.DataFrame(rows)
+                .sort_values("Promedio", ascending=False)
+                .reset_index(drop=True)
+            )
+
+            with st.expander(f"{sec_name}", expanded=False):
+                st.dataframe(sec_df, use_container_width=True)
     with tab3:
         st.markdown("### Comentarios y respuestas abiertas")
 
