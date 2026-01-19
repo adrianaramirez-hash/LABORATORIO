@@ -4,13 +4,17 @@ import streamlit as st
 import gspread
 import textwrap
 import re
+import altair as alt
 
 # ============================================================
 # Config
 # ============================================================
 SHEET_BASE = "BASE"  # pestaña en tu Google Sheet de Evaluación Docente
 
-# Por consistencia con tu línea de trabajo
+
+# ============================================================
+# Helpers (alineados a tu estilo previo)
+# ============================================================
 def _to_float(x):
     try:
         return float(str(x).replace("%", "").strip())
@@ -48,7 +52,7 @@ def _norm_text(s: str) -> str:
 
 
 def _norm_key(s: str) -> str:
-    # clave más agresiva para matching profesor/carrera
+    # clave robusta para matching (ignoramos puntuación, dobles espacios, etc.)
     s = _norm_text(s)
     s = re.sub(r"[^a-z0-9 ]+", "", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -71,8 +75,24 @@ def _safe_percent(n, d):
         return pd.NA
 
 
+def _cycle_sort_key(c: str):
+    """
+    Ordena ciclos tipo 25-1, 25-2, 26-1...
+    Si no matchea, manda al final.
+    """
+    s = str(c).strip()
+    m = re.match(r"^(\d{2,4})\s*-\s*(\d{1,2})$", s)
+    if not m:
+        return (9999, 99, s)
+    y = int(m.group(1))
+    if y < 100:
+        y = 2000 + y
+    p = int(m.group(2))
+    return (y, p, s)
+
+
 # ============================================================
-# Google Sheets loaders (misma filosofía que tu módulo de EC)
+# Google Sheets loader
 # ============================================================
 @st.cache_data(show_spinner=False, ttl=300)
 def _load_sheet_as_df(url: str, sheet_name: str) -> pd.DataFrame:
@@ -108,23 +128,18 @@ def _load_sheet_as_df(url: str, sheet_name: str) -> pd.DataFrame:
 def _load_observaciones_df_from_secret() -> tuple[pd.DataFrame, str | None]:
     """
     Carga Observación de clases desde secret OC_SHEET_URL.
-    Regresa (df, fecha_col_detectada).
-    Si no existe OC_SHEET_URL o falla, regresa (df_vacio, None).
+    Si OC_SHEET_NAME existe, la usa; si no, intenta nombres comunes.
     """
     url = st.secrets.get("OC_SHEET_URL", "").strip()
     if not url:
         return pd.DataFrame(), None
 
-    # Intento 1: si conoces el nombre de pestaña, puedes definirlo en secret OC_SHEET_NAME
     sheet_name = st.secrets.get("OC_SHEET_NAME", "").strip()
     if not sheet_name:
-        # fallback razonable: muchas implementaciones usan "FORM" / "RESPUESTAS" / "DATA"
-        # intentamos varias sin preguntar
         candidates = ["FORM", "RESPUESTAS", "DATA", "PROCESADO", "Observacion", "OBSERVACION"]
     else:
         candidates = [sheet_name]
 
-    last_err = None
     for sn in candidates:
         try:
             df = _load_sheet_as_df(url, sn)
@@ -133,18 +148,16 @@ def _load_observaciones_df_from_secret() -> tuple[pd.DataFrame, str | None]:
                 if fecha_col:
                     df[fecha_col] = pd.to_datetime(df[fecha_col], errors="coerce", dayfirst=True)
                 return df, fecha_col
-        except Exception as e:
-            last_err = e
+        except Exception:
+            continue
 
-    # Si no pudimos, no tronamos el módulo
     return pd.DataFrame(), None
 
 
 # ============================================================
-# Heurísticas para columnas de Observación de clases
+# Heurísticas columnas Observación
 # ============================================================
 def _pick_prof_col_oc(df: pd.DataFrame) -> str | None:
-    # Busca columnas típicas
     candidates = [
         "Docente", "docente",
         "Profesor", "profesor",
@@ -154,8 +167,6 @@ def _pick_prof_col_oc(df: pd.DataFrame) -> str | None:
     for c in candidates:
         if c in df.columns:
             return c
-
-    # fallback: primera columna que contenga "doc" o "prof"
     for c in df.columns:
         lc = str(c).lower()
         if "doc" in lc or "prof" in lc:
@@ -189,7 +200,6 @@ def _pick_link_col_oc(df: pd.DataFrame) -> str | None:
 
 
 def _pick_result_col_oc(df: pd.DataFrame) -> str | None:
-    # score / resultado / calificación / cumplimiento
     for c in df.columns:
         lc = str(c).lower()
         if any(k in lc for k in ["resultado", "calificacion", "calificación", "puntaje", "score", "cumplimiento"]):
@@ -198,7 +208,36 @@ def _pick_result_col_oc(df: pd.DataFrame) -> str | None:
 
 
 # ============================================================
-# Render principal (alineado a tu estilo: tablas y lógica DG/Director)
+# Cálculos
+# ============================================================
+def _promedio_ponderado(dfx: pd.DataFrame) -> float | pd.NA:
+    w = pd.to_numeric(dfx["total"], errors="coerce")
+    y = pd.to_numeric(dfx["promedio"], errors="coerce")
+    denom = w.sum(skipna=True)
+    if pd.notna(denom) and float(denom) > 0:
+        return (y * w).sum(skipna=True) / denom
+    return y.mean()
+
+
+def _make_line_chart(df_line: pd.DataFrame, x: str, y: str, title: str):
+    if df_line.empty:
+        st.info("No hay datos suficientes para graficar con los filtros actuales.")
+        return
+    chart = (
+        alt.Chart(df_line)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X(f"{x}:O", sort=df_line[x].tolist(), title="Ciclo"),
+            y=alt.Y(f"{y}:Q", title="Promedio"),
+            tooltip=[x, y],
+        )
+        .properties(height=300, title=title)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+# ============================================================
+# Render principal
 # ============================================================
 def render_evaluacion_docente(
     vista: str | None = None,
@@ -210,16 +249,15 @@ def render_evaluacion_docente(
     if not vista:
         vista = "Dirección General"
 
-    # URL (preferimos argumento; si no, secret)
     if not ed_url:
         ed_url = st.secrets.get("EDOCENTE_URL", "").strip()
 
     if not ed_url:
-        st.error("Falta configurar la URL de Evaluación Docente. Agrega EDOCENTE_URL en Secrets o pásala como parámetro.")
+        st.error("Falta configurar la URL de Evaluación Docente (EDOCENTE_URL en Secrets) o pásala como parámetro.")
         return
 
     # ---------------------------
-    # Carga base ED
+    # Carga ED
     # ---------------------------
     try:
         with st.spinner("Cargando Evaluación Docente (Google Sheets)…"):
@@ -233,48 +271,49 @@ def render_evaluacion_docente(
         st.warning("La hoja BASE está vacía.")
         return
 
-    # Validación columnas mínimas
     required = {"profesor", "grupo", "materia", "carrera", "aplicaron", "total", "promedio", "ciclo"}
     missing = [c for c in required if c not in df.columns]
     if missing:
         st.error(f"Faltan columnas en BASE: {', '.join(missing)}")
         return
 
-    # Tipos
+    # Tipos + normalizados
     df = df.copy()
     df["aplicaron"] = df["aplicaron"].apply(_to_int)
     df["total"] = df["total"].apply(_to_int)
     df["promedio"] = df["promedio"].apply(_to_float)
-    df["participacion_pct"] = [
-        _safe_percent(n, d) for n, d in zip(df["aplicaron"], df["total"])
-    ]
+    df["participacion_pct"] = [_safe_percent(n, d) for n, d in zip(df["aplicaron"], df["total"])]
 
-    # Normalizados para matching
     df["_prof_key"] = df["profesor"].apply(_norm_key)
     df["_car_key"] = df["carrera"].apply(_norm_key)
+    df["_ciclo_key"] = df["ciclo"].apply(_cycle_sort_key)
 
-    # ---------------------------
-    # Controles (ciclo, carrera, umbral)
-    # ---------------------------
-    ciclos = sorted(df["ciclo"].dropna().astype(str).str.strip().unique().tolist())
+    # ciclos ordenados
+    ciclos = df["ciclo"].dropna().astype(str).str.strip().unique().tolist()
+    ciclos = sorted(ciclos, key=_cycle_sort_key)
     if not ciclos:
         st.warning("No encontré valores de ciclo.")
         return
 
+    # ---------------------------
+    # Controles
+    # ---------------------------
     c1, c2, c3 = st.columns([1.0, 1.4, 1.0])
-
     with c1:
         ciclo_sel = st.selectbox("Ciclo", ciclos, index=max(0, len(ciclos) - 1))
 
-    # Carrera
+    # Carrera (DG vs DC)
     if vista == "Dirección General":
         with c2:
-            carreras = sorted(df.loc[df["ciclo"].astype(str).str.strip() == str(ciclo_sel).strip(), "carrera"]
-                              .dropna().astype(str).str.strip().unique().tolist())
+            # opciones desde el ciclo seleccionado
+            base_ciclo = df[df["ciclo"].astype(str).str.strip() == str(ciclo_sel).strip()].copy()
+            carreras = sorted(base_ciclo["carrera"].dropna().astype(str).str.strip().unique().tolist())
             carrera_opts = ["(Todas)"] + carreras
             carrera_sel = st.selectbox("Carrera", carrera_opts, index=0)
+            carrera_key_sel = "" if carrera_sel == "(Todas)" else _norm_key(carrera_sel)
     else:
         carrera_sel = (carrera or "").strip()
+        carrera_key_sel = _norm_key(carrera_sel)
         with c2:
             st.text_input("Carrera (fija por vista)", value=carrera_sel, disabled=True)
 
@@ -284,52 +323,70 @@ def render_evaluacion_docente(
     st.divider()
 
     # ---------------------------
-    # Aplicar filtros base
+    # Filtro principal (para tablas del ciclo seleccionado)
     # ---------------------------
     f = df[df["ciclo"].astype(str).str.strip() == str(ciclo_sel).strip()].copy()
 
+    # FIX DC: filtrar por clave normalizada
     if vista == "Dirección General":
-        if carrera_sel != "(Todas)":
-            f = f[f["carrera"].astype(str).str.strip() == str(carrera_sel).strip()]
+        if carrera_key_sel:
+            f = f[f["_car_key"] == carrera_key_sel]
     else:
-        if carrera_sel:
-            f = f[f["carrera"].astype(str).str.strip() == carrera_sel]
-        else:
+        if not carrera_key_sel:
             st.warning("Vista Director requiere carrera fija para filtrar.")
             return
+        f = f[f["_car_key"] == carrera_key_sel]
 
-    st.caption(f"Registros filtrados: **{len(f)}**")
+    # Diagnóstico breve (útil para cuando “no se ve nada”)
+    if vista != "Dirección General" and len(f) == 0:
+        st.error("No hay registros para tu carrera con el filtro actual.")
+        st.caption(
+            "Causa típica: el nombre de carrera en ACCESOS no coincide con el de la base. "
+            "Solución: ajustar SERVICIO_ASIGNADO o estandarizar el nombre en la columna 'carrera'."
+        )
+        st.caption(f"Carrera (DC): '{carrera_sel}' | clave usada: '{carrera_key_sel}'")
+        # Mostrar carreras disponibles en la base (primeras 25) para comparar rápido
+        uniques = sorted(df["carrera"].dropna().astype(str).str.strip().unique().tolist())
+        st.caption("Ejemplos de carreras en la base (para comparar):")
+        st.dataframe(pd.DataFrame({"carrera": uniques[:25]}), use_container_width=True)
+        return
+
+    st.caption(f"Registros filtrados (ciclo): **{len(f)}**")
     if len(f) == 0:
         st.warning("No hay registros con los filtros seleccionados.")
         return
 
-    # KPIs
+    # KPIs del ciclo
     prom_global = pd.to_numeric(f["promedio"], errors="coerce").mean()
-    part_global = _safe_percent(pd.to_numeric(f["aplicaron"], errors="coerce").sum(),
-                                pd.to_numeric(f["total"], errors="coerce").sum())
+    part_global = _safe_percent(
+        pd.to_numeric(f["aplicaron"], errors="coerce").sum(),
+        pd.to_numeric(f["total"], errors="coerce").sum(),
+    )
     grupos = len(f)
 
-    k1, k2, k3 = st.columns(3)
+    focos_ciclo = f[pd.to_numeric(f["promedio"], errors="coerce") <= float(umbral)]
+    pct_focos = _safe_percent(len(focos_ciclo), len(f))  # % de casos alerta sobre filas
+
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Promedio (ciclo)", f"{prom_global:.2f}" if pd.notna(prom_global) else "—")
     k2.metric("Participación", f"{part_global:.1f}%" if pd.notna(part_global) else "—")
     k3.metric("Grupos evaluados", f"{grupos}")
+    k4.metric("Casos en alerta", f"{len(focos_ciclo)} ({pct_focos:.1f}%)" if pd.notna(pct_focos) else f"{len(focos_ciclo)}")
 
     st.divider()
 
     # ---------------------------
-    # Cargar Observaciones (solo lectura; vínculo)
+    # Cargar Observaciones (para vínculo)
     # ---------------------------
     oc_df, oc_fecha_col = _load_observaciones_df_from_secret()
     oc_has_data = not oc_df.empty
 
-    # Preparar columnas OC si existe
     if oc_has_data:
         oc_prof_col = _pick_prof_col_oc(oc_df)
         oc_car_col = _pick_carrera_col_oc(oc_df)
         oc_link_col = _pick_link_col_oc(oc_df)
         oc_res_col = _pick_result_col_oc(oc_df)
 
-        # Normalizados
         if oc_prof_col:
             oc_df["_prof_key"] = oc_df[oc_prof_col].apply(_norm_key)
         else:
@@ -343,62 +400,103 @@ def render_evaluacion_docente(
         oc_prof_col = oc_car_col = oc_link_col = oc_res_col = None
 
     # ---------------------------
-    # Tabs (solo tablas; consistente con tu estilo)
+    # Tabs
     # ---------------------------
-    tabs = ["Resumen", "Focos rojos", "Vinculación con Observación"]
-    tab1, tab2, tab3 = st.tabs(tabs)
+    tabs = ["Resumen", "Tendencia", "Focos rojos", "Top docentes", "Vinculación con Observación"]
+    tab1, tabT, tab2, tabTop, tab3 = st.tabs(tabs)
 
     # ===========================
-    # TAB 1: Resumen
+    # TAB 1: Resumen (tablas)
     # ===========================
     with tab1:
-        if vista == "Dirección General" and carrera_sel == "(Todas)":
-            st.markdown("### Promedio por carrera — tabla")
+        if vista == "Dirección General" and (carrera_key_sel == ""):
+            st.markdown("### Promedio por carrera — tabla (ciclo)")
             rows = []
             for car, dfx in f.groupby("carrera"):
                 car = str(car).strip()
                 if not car:
                     continue
                 prom = pd.to_numeric(dfx["promedio"], errors="coerce").mean()
-                part = _safe_percent(pd.to_numeric(dfx["aplicaron"], errors="coerce").sum(),
-                                     pd.to_numeric(dfx["total"], errors="coerce").sum())
-                rows.append({
-                    "Carrera": car,
-                    "Promedio": float(prom) if pd.notna(prom) else pd.NA,
-                    "Participación %": float(part) if pd.notna(part) else pd.NA,
-                    "Grupos": int(len(dfx)),
-                    "Alerta (≤ umbral)": "Sí" if pd.notna(prom) and float(prom) <= float(umbral) else ""
-                })
+                part = _safe_percent(
+                    pd.to_numeric(dfx["aplicaron"], errors="coerce").sum(),
+                    pd.to_numeric(dfx["total"], errors="coerce").sum(),
+                )
+                alert_cnt = (pd.to_numeric(dfx["promedio"], errors="coerce") <= float(umbral)).sum()
+                rows.append(
+                    {
+                        "Carrera": car,
+                        "Promedio": float(prom) if pd.notna(prom) else pd.NA,
+                        "Participación %": float(part) if pd.notna(part) else pd.NA,
+                        "Grupos": int(len(dfx)),
+                        "Casos en alerta": int(alert_cnt),
+                    }
+                )
             out = pd.DataFrame(rows).sort_values("Promedio", ascending=False, na_position="last")
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
         else:
-            st.markdown("### Promedio por docente — tabla")
+            st.markdown("### Promedio por docente — tabla (ciclo)")
             rows = []
-            # ponderado por total
             for prof, dfx in f.groupby("profesor"):
-                w = pd.to_numeric(dfx["total"], errors="coerce")
-                y = pd.to_numeric(dfx["promedio"], errors="coerce")
-                denom = w.sum(skipna=True)
-                prom_w = (y * w).sum(skipna=True) / denom if pd.notna(denom) and float(denom) > 0 else y.mean()
-                part = _safe_percent(pd.to_numeric(dfx["aplicaron"], errors="coerce").sum(),
-                                     pd.to_numeric(dfx["total"], errors="coerce").sum())
+                prom_w = _promedio_ponderado(dfx)
+                part = _safe_percent(
+                    pd.to_numeric(dfx["aplicaron"], errors="coerce").sum(),
+                    pd.to_numeric(dfx["total"], errors="coerce").sum(),
+                )
                 alerts = (pd.to_numeric(dfx["promedio"], errors="coerce") <= float(umbral)).sum()
-                rows.append({
-                    "Profesor": prof,
-                    "Promedio (ponderado)": float(prom_w) if pd.notna(prom_w) else pd.NA,
-                    "Participación %": float(part) if pd.notna(part) else pd.NA,
-                    "Grupos": int(len(dfx)),
-                    "Casos en alerta": int(alerts),
-                })
+                rows.append(
+                    {
+                        "Profesor": prof,
+                        "Promedio (ponderado)": float(prom_w) if pd.notna(prom_w) else pd.NA,
+                        "Participación %": float(part) if pd.notna(part) else pd.NA,
+                        "Grupos": int(len(dfx)),
+                        "Casos en alerta": int(alerts),
+                    }
+                )
             out = pd.DataFrame(rows).sort_values("Promedio (ponderado)", ascending=False, na_position="last")
             out["Profesor"] = out["Profesor"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
     # ===========================
-    # TAB 2: Focos rojos
+    # TAB Tendencia (línea por ciclos)
+    # ===========================
+    with tabT:
+        st.markdown("### Tendencia por ciclos — promedio")
+        # Base para tendencia: se filtra por carrera si aplica (DG con carrera elegida o DC)
+        trend_base = df.copy()
+
+        if vista == "Dirección General":
+            if carrera_key_sel:
+                trend_base = trend_base[trend_base["_car_key"] == carrera_key_sel]
+                title = f"Tendencia de promedio — {carrera_sel}"
+            else:
+                title = "Tendencia de promedio — Institución"
+        else:
+            trend_base = trend_base[trend_base["_car_key"] == carrera_key_sel]
+            title = f"Tendencia de promedio — {carrera_sel}"
+
+        # Agrupar por ciclo
+        rows = []
+        for cyc, dfx in trend_base.groupby("ciclo"):
+            prom = pd.to_numeric(dfx["promedio"], errors="coerce").mean()
+            rows.append({"ciclo": str(cyc).strip(), "promedio": float(prom) if pd.notna(prom) else pd.NA})
+
+        df_line = pd.DataFrame(rows)
+        if df_line.empty:
+            st.info("No hay datos suficientes para tendencia.")
+        else:
+            df_line = df_line.dropna(subset=["ciclo"]).copy()
+            df_line["sort_key"] = df_line["ciclo"].apply(_cycle_sort_key)
+            df_line = df_line.sort_values("sort_key")
+            df_line = df_line.drop(columns=["sort_key"])
+
+            _make_line_chart(df_line, x="ciclo", y="promedio", title=title)
+            st.dataframe(df_line.reset_index(drop=True), use_container_width=True)
+
+    # ===========================
+    # TAB 2: Focos rojos (detalle + vínculo Sí/No)
     # ===========================
     with tab2:
-        st.markdown("### Casos con promedio ≤ umbral — detalle")
+        st.markdown("### Casos con promedio ≤ umbral — detalle (ciclo)")
         focos = f[pd.to_numeric(f["promedio"], errors="coerce") <= float(umbral)].copy()
 
         if focos.empty:
@@ -406,25 +504,69 @@ def render_evaluacion_docente(
         else:
             focos["Participación %"] = focos["participacion_pct"]
             focos["Observación encontrada"] = ""
+
             if oc_has_data and oc_prof_col:
-                # Match por profesor y (si existe) carrera
                 oc_sub = oc_df.copy()
-                if vista != "Dirección General" or carrera_sel != "(Todas)":
-                    # intentamos acotar por carrera si tenemos col
-                    if oc_car_col and carrera_sel and carrera_sel != "(Todas)":
-                        oc_sub = oc_sub[oc_sub["_car_key"] == _norm_key(carrera_sel)]
+
+                # acotar por carrera si podemos (DG carrera específica / DC siempre)
+                if oc_car_col and (carrera_key_sel or vista != "Dirección General"):
+                    oc_sub = oc_sub[oc_sub["_car_key"] == (carrera_key_sel if carrera_key_sel else oc_sub["_car_key"])]
 
                 oc_keys = set(oc_sub["_prof_key"].dropna().tolist())
                 focos["Observación encontrada"] = focos["_prof_key"].apply(lambda k: "Sí" if k in oc_keys else "No")
             elif not oc_has_data:
                 st.caption("Nota: No hay datos de Observación de clases configurados (OC_SHEET_URL).")
             else:
-                st.caption("Nota: No pude detectar la columna de docente en Observación de clases; se omite el vínculo.")
+                st.caption("Nota: No pude detectar la columna de docente en Observación; se omite el vínculo.")
 
             show_cols = ["profesor", "materia", "grupo", "promedio", "Participación %", "ciclo", "Observación encontrada"]
             out = focos[show_cols].copy()
             out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
-            out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=40, max_lines=2))
+            out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
+            st.dataframe(out.reset_index(drop=True), use_container_width=True)
+
+    # ===========================
+    # TAB Top docentes
+    # ===========================
+    with tabTop:
+        st.markdown("### Top docentes — ranking (ciclo)")
+        st.caption("Criterio: promedio ponderado por total de alumnos. Filtros aplican según tu vista/carrera.")
+
+        # Reglas mínimas para ranking (evitar “tops” con 1 grupo si no quieres)
+        cmin1, cmin2 = st.columns([1, 1])
+        with cmin1:
+            min_grupos = st.number_input("Mínimo de grupos", min_value=1, max_value=20, value=1, step=1)
+        with cmin2:
+            min_part = st.number_input("Participación mínima %", min_value=0, max_value=100, value=0, step=5)
+
+        rows = []
+        for prof, dfx in f.groupby("profesor"):
+            grupos_prof = len(dfx)
+            part_prof = _safe_percent(
+                pd.to_numeric(dfx["aplicaron"], errors="coerce").sum(),
+                pd.to_numeric(dfx["total"], errors="coerce").sum(),
+            )
+            if grupos_prof < int(min_grupos):
+                continue
+            if pd.notna(part_prof) and float(part_prof) < float(min_part):
+                continue
+
+            prom_w = _promedio_ponderado(dfx)
+            rows.append(
+                {
+                    "Profesor": prof,
+                    "Promedio (ponderado)": float(prom_w) if pd.notna(prom_w) else pd.NA,
+                    "Participación %": float(part_prof) if pd.notna(part_prof) else pd.NA,
+                    "Grupos": int(grupos_prof),
+                }
+            )
+
+        out = pd.DataFrame(rows)
+        if out.empty:
+            st.info("No hay docentes que cumplan los criterios mínimos con los filtros actuales.")
+        else:
+            out = out.sort_values("Promedio (ponderado)", ascending=False, na_position="last")
+            out["Profesor"] = out["Profesor"].apply(lambda x: _wrap_text(x, width=50, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
     # ===========================
@@ -433,19 +575,12 @@ def render_evaluacion_docente(
     with tab3:
         st.markdown("### Vinculación (Evaluación Docente → Observación de clases)")
         if not oc_has_data:
-            st.warning(
-                "No pude cargar Observación de clases. "
-                "Configura **OC_SHEET_URL** (y opcionalmente OC_SHEET_NAME) en Secrets."
-            )
+            st.warning("No pude cargar Observación de clases. Configura **OC_SHEET_URL** (y opcionalmente OC_SHEET_NAME) en Secrets.")
             return
         if not oc_prof_col:
-            st.warning(
-                "Cargué Observación de clases, pero no pude detectar la columna del docente. "
-                "Renombra una columna a 'Docente' o 'Profesor' (o similar) en tu Sheet de Observación."
-            )
+            st.warning("Cargué Observación, pero no pude detectar la columna del docente. Renombra una columna a 'Docente' o 'Profesor' (o similar).")
             return
 
-        # Selector de profesor a partir del filtrado
         profs = sorted(f["profesor"].dropna().astype(str).str.strip().unique().tolist())
         if not profs:
             st.info("No hay profesores para mostrar.")
@@ -453,7 +588,6 @@ def render_evaluacion_docente(
 
         prof_sel = st.selectbox("Profesor", profs, index=0)
 
-        # Caso(s) del profesor en ED
         ed_prof = f[f["profesor"].astype(str).str.strip() == str(prof_sel).strip()].copy()
         st.caption(f"Registros en Evaluación Docente para este profesor (ciclo): {len(ed_prof)}")
 
@@ -462,18 +596,12 @@ def render_evaluacion_docente(
         ed_show.rename(columns={"participacion_pct": "Participación %"}, inplace=True)
         st.dataframe(ed_show.reset_index(drop=True), use_container_width=True)
 
-        # Buscar observaciones vinculadas (por profesor y, si se puede, por carrera filtrada)
+        # buscar observaciones por profesor y carrera (si existe)
         oc_sub = oc_df[oc_df["_prof_key"] == _norm_key(prof_sel)].copy()
 
-        if vista == "Dirección General":
-            # Si DG eligió carrera específica, acotamos
-            if carrera_sel != "(Todas)" and oc_car_col:
-                oc_sub = oc_sub[oc_sub["_car_key"] == _norm_key(carrera_sel)]
-        else:
-            if carrera_sel and oc_car_col:
-                oc_sub = oc_sub[oc_sub["_car_key"] == _norm_key(carrera_sel)]
+        if oc_car_col and carrera_key_sel:
+            oc_sub = oc_sub[oc_sub["_car_key"] == carrera_key_sel]
 
-        # Mostrar resultados
         if oc_sub.empty:
             st.info("No se encontraron observaciones vinculadas para este profesor con los filtros actuales.")
             return
@@ -491,17 +619,14 @@ def render_evaluacion_docente(
         if oc_link_col and oc_link_col in oc_sub.columns:
             cols_to_show.append(oc_link_col)
 
-        # Si no detectamos nada extra, mostramos todo (limitado)
         if not cols_to_show:
             cols_to_show = oc_sub.columns.tolist()[:12]
 
         out = oc_sub[cols_to_show].copy()
 
-        # formateo básico
         if oc_fecha_col and oc_fecha_col in out.columns:
             out[oc_fecha_col] = pd.to_datetime(out[oc_fecha_col], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
 
-        # wrap
         out[oc_prof_col] = out[oc_prof_col].apply(lambda x: _wrap_text(x, width=40, max_lines=2))
         if oc_car_col and oc_car_col in out.columns:
             out[oc_car_col] = out[oc_car_col].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
@@ -511,6 +636,6 @@ def render_evaluacion_docente(
         st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
         st.caption(
-            "Vinculación realizada por coincidencia de **Profesor** (y **Carrera** si existe en Observación). "
-            "Si deseas vincular por Materia/Grupo también, se puede añadir cuando confirmemos esos campos en Observación."
+            "Vinculación por coincidencia de **Profesor** y (si existe) **Carrera**. "
+            "Si más adelante confirmamos Materia/Grupo en Observación, lo hacemos más preciso."
         )
