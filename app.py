@@ -5,6 +5,7 @@ import encuesta_calidad
 import observacion_clases
 import aulas_virtuales
 import indice_reprobacion  # ✅ NUEVO
+import evaluacion_docente  # ✅ NUEVO (módulo Evaluación docente)
 from examenes_departamentales import render_examenes_departamentales
 
 import pandas as pd
@@ -529,7 +530,15 @@ try:
         observacion_clases.render_observacion_clases(vista=vista, carrera=carrera)
 
     elif seccion == "Evaluación docente":
-        _placeholder_en_construccion("Evaluación docente")
+        # ✅ NUEVO: render real del módulo
+        # NOTA: El módulo toma la URL de Evaluación Docente desde Secrets (EDOCENTE_URL)
+        # o puedes pasarla aquí. Como ya me compartiste la URL, puedes dejarla hardcodeada
+        # mientras pruebas, o moverla a Secrets.
+        evaluacion_docente.render_evaluacion_docente(
+            vista=vista,
+            carrera=carrera,
+            ed_url="https://docs.google.com/spreadsheets/d/1bCQmPZ1MIZNpLKBAMYEwBrivfq_YjcxO3zN734Rgt7o/edit?gid=0#gid=0",
+        )
 
     elif seccion == "Capacitaciones":
         _placeholder_en_construccion("Capacitaciones")
