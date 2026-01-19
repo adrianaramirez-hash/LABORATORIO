@@ -200,7 +200,6 @@ def _catalogo_build_maps(catalogo: pd.DataFrame):
     if catalogo is None or catalogo.empty:
         return {}, {}
 
-    # Validación mínima
     needed = {"Carrera", "Version"}
     if not needed.issubset(set(catalogo.columns)):
         return {}, {}
@@ -209,7 +208,6 @@ def _catalogo_build_maps(catalogo: pd.DataFrame):
     for c in ["Carrera", "Version"]:
         cat[c] = cat[c].astype(str).str.strip()
 
-    # Preferimos "Notas (opcional)" como display, si existe. Si no existe, usamos Carrera.
     display_col = "Notas (opcional)" if "Notas (opcional)" in cat.columns else None
     if display_col:
         cat[display_col] = cat[display_col].astype(str).str.strip()
@@ -237,7 +235,6 @@ def _catalogo_build_maps(catalogo: pd.DataFrame):
             map_display_to_canon[(dk, vk)] = canon
 
         if ck and vk:
-            # guarda el display (bonito) para DG
             map_canon_to_display[(ck, vk)] = display
 
     return map_display_to_canon, map_canon_to_display
@@ -272,10 +269,139 @@ def _bar_h(df, cat, val, title):
         .encode(
             y=alt.Y(f"{cat}:N", sort="-x", title=None),
             x=alt.X(f"{val}:Q", title=title),
-            tooltip=[alt.Tooltip(cat, title=cat), alt.Tooltip(val, title=title, format=".2f")],
+            tooltip=[
+                alt.Tooltip(cat, title=cat),
+                alt.Tooltip(val, title=title, format=".2f"),
+            ],
         )
         .properties(height=height)
     )
+
+
+# ============================================================
+# NUEVO: utilidades para “examen sin respuestas”
+# ============================================================
+def _pick_question_col(base: pd.DataFrame):
+    """
+    Detecta la columna de enunciado/pregunta en BASE_CONSOLIDADA.
+    Ajusta aquí si tu nombre exacto es distinto.
+    """
+    candidates = [
+        "Pregunta",
+        "Enunciado",
+        "Reactivo",
+        "Ítem",
+        "Item",
+        "Texto",
+        "Planteamiento",
+    ]
+    for c in candidates:
+        if c in base.columns:
+            return c
+    # Fallback heurístico: primera columna que contenga "pregunt" o "enunci"
+    for c in base.columns:
+        ck = _clean_key(c)
+        if "pregunt" in ck or "enunci" in ck or "reactiv" in ck:
+            return c
+    return None
+
+
+def _build_public_exam_df(base_f: pd.DataFrame):
+    """
+    Regresa DF del EXAMEN (reactivos incluidos) sin respuestas:
+    - Se arma desde BASE (no desde respuestas/alumnos).
+    - Excluye Clave y Clave_letter.
+    """
+    if base_f is None or base_f.empty:
+        return pd.DataFrame()
+
+    qcol = _pick_question_col(base_f)
+
+    cols = ["Area", "Materia", "ID_reactivo"]
+    if qcol:
+        cols.append(qcol)
+    for c in ["A", "B", "C", "D"]:
+        if c in base_f.columns:
+            cols.append(c)
+
+    out = base_f.copy()
+    # blindaje explícito
+    for sensitive in ["Clave", "Clave_letter"]:
+        if sensitive in out.columns:
+            out = out.drop(columns=[sensitive], errors="ignore")
+
+    # evitar duplicidad por seguridad
+    out = out.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
+
+    # seleccionar columnas
+    keep = [c for c in cols if c in out.columns]
+    out = out[keep].copy()
+
+    if qcol and qcol in out.columns:
+        out = out.rename(columns={qcol: "Pregunta"})
+
+    return out
+
+
+def _download_df_buttons(df: pd.DataFrame, filename_prefix: str):
+    if df is None or df.empty:
+        return
+    csv = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        label="Descargar CSV (sin respuestas)",
+        data=csv,
+        file_name=f"{filename_prefix}.csv",
+        mime="text/csv",
+    )
+
+
+def _render_tab_examen_por_area(exam_pub: pd.DataFrame, filename_prefix: str):
+    if exam_pub is None or exam_pub.empty:
+        st.warning("No hay reactivos para mostrar en esta versión/carrera.")
+        return
+
+    st.markdown("#### Conteo de reactivos por área")
+    resumen = (
+        exam_pub.groupby("Area", as_index=False)["ID_reactivo"]
+        .nunique()
+        .rename(columns={"ID_reactivo": "Reactivos"})
+        .sort_values("Reactivos", ascending=False)
+    )
+    st.dataframe(resumen, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("#### Reactivos incluidos (sin respuestas)")
+    detalle_cols = [c for c in ["Area", "Materia", "ID_reactivo", "Pregunta", "A", "B", "C", "D"] if c in exam_pub.columns]
+    detalle = exam_pub[detalle_cols].sort_values(["Area", "Materia", "ID_reactivo"])
+    st.dataframe(detalle, use_container_width=True, hide_index=True)
+
+    st.divider()
+    _download_df_buttons(detalle, filename_prefix=filename_prefix + "_examen_por_area")
+
+
+def _render_tab_examen_por_materia(exam_pub: pd.DataFrame, filename_prefix: str):
+    if exam_pub is None or exam_pub.empty:
+        st.warning("No hay reactivos para mostrar en esta versión/carrera.")
+        return
+
+    materias = sorted([m for m in exam_pub["Materia"].dropna().unique().tolist() if str(m).strip() and str(m).lower() != "nan"])
+    if not materias:
+        st.warning("No encontré materias para listar.")
+        return
+
+    sel_m = st.selectbox("Materia", materias, index=0)
+    df_m = exam_pub[exam_pub["Materia"] == sel_m].copy()
+
+    st.caption(f"Reactivos incluidos en **{sel_m}**: **{df_m['ID_reactivo'].nunique():,}**")
+
+    cols = [c for c in ["Materia", "Area", "ID_reactivo", "Pregunta", "A", "B", "C", "D"] if c in df_m.columns]
+    df_m = df_m[cols].sort_values(["Area", "ID_reactivo"])
+
+    st.dataframe(df_m, use_container_width=True, hide_index=True)
+
+    st.divider()
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(sel_m))[:80]
+    _download_df_buttons(df_m, filename_prefix=filename_prefix + f"_materia_{safe_name}")
 
 
 # ============================================================
@@ -408,7 +534,7 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
         ba_f = ba_f[ba_f["Version"] == version].copy()
 
     if base_f.empty or df_f.empty or ba_f.empty:
-        return None, None, None, 0, pd.DataFrame(), pd.DataFrame()
+        return None, None, None, 0, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     prom_0_10 = float(pd.to_numeric(ba_f["Promedio_0_10"], errors="coerce").mean())
     prom_pct = float(pd.to_numeric(ba_f["Porcentaje_0_100"], errors="coerce").mean())
@@ -461,7 +587,10 @@ def _detalle_carrera(df, base, by_alumno, carrera, version):
         .sort_values("Promedio_materia", ascending=False)
     )
 
-    return prom_0_10, prom_pct, cov_pct, n_respondieron, area_df, materia_df
+    # NUEVO: DF público del examen (sin respuestas) para tabs
+    exam_pub = _build_public_exam_df(base_f)
+
+    return prom_0_10, prom_pct, cov_pct, n_respondieron, area_df, materia_df, exam_pub
 
 
 # ============================================================
@@ -509,7 +638,7 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
         ba_v = ba_v[ba_v["Version"] == sel_version].copy()
 
     # ========================================================
-    # Director de carrera (usa catálogo: Notas -> Carrera canónica)
+    # Director de carrera
     # ========================================================
     if not es_direccion_general:
         display_input = (carrera or "").strip()
@@ -517,18 +646,15 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
             st.warning("No recibí la carrera desde app.py. En vista Director de carrera es obligatoria.")
             return
 
-        # Si eligió "Todas", no aplica para director, pero lo manejamos:
         if sel_version == "Todas":
             st.warning("En vista Director de carrera, selecciona una Aplicación / Versión específica.")
             return
 
         carrera_canon = _resolve_canon_from_display(display_input, sel_version, map_display_to_canon)
-
-        # Fallback: si no hay catálogo o no coincide, intenta directo con el valor que venga
         if not carrera_canon:
             carrera_canon = display_input
 
-        prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(
+        prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df, exam_pub = _detalle_carrera(
             df_v, base_v, ba_v, carrera_canon, sel_version
         )
 
@@ -545,18 +671,35 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
         c4.metric("Alumnos que respondieron", f"{n_al:,}")
 
         st.divider()
-        st.markdown("### Promedio por área (0–10)")
-        st.dataframe(area_df, use_container_width=True, hide_index=True)
-        ch_a = _bar_h(area_df, "Area", "Promedio_area", "Promedio (0–10)")
-        if ch_a is not None:
-            st.altair_chart(ch_a, use_container_width=True)
 
-        st.divider()
-        st.markdown("### Promedio por materia (0–10)")
-        st.dataframe(materia_df, use_container_width=True, hide_index=True)
-        ch_m = _bar_h(materia_df, "Materia", "Promedio_materia", "Promedio (0–10)")
-        if ch_m is not None:
-            st.altair_chart(ch_m, use_container_width=True)
+        tab1, tab2, tab3 = st.tabs(["Resultados", "Examen por área", "Examen por materia"])
+
+        with tab1:
+            st.markdown("### Promedio por área (0–10)")
+            st.dataframe(area_df, use_container_width=True, hide_index=True)
+            ch_a = _bar_h(area_df, "Area", "Promedio_area", "Promedio (0–10)")
+            if ch_a is not None:
+                st.altair_chart(ch_a, use_container_width=True)
+
+            st.divider()
+
+            st.markdown("### Promedio por materia (0–10)")
+            st.dataframe(materia_df, use_container_width=True, hide_index=True)
+            ch_m = _bar_h(materia_df, "Materia", "Promedio_materia", "Promedio (0–10)")
+            if ch_m is not None:
+                st.altair_chart(ch_m, use_container_width=True)
+
+        with tab2:
+            _render_tab_examen_por_area(
+                exam_pub=exam_pub,
+                filename_prefix=f"examen_{sel_version}_{carrera_canon}",
+            )
+
+        with tab3:
+            _render_tab_examen_por_materia(
+                exam_pub=exam_pub,
+                filename_prefix=f"examen_{sel_version}_{carrera_canon}",
+            )
 
         return
 
@@ -591,7 +734,6 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
             .sort_values("Porcentaje", ascending=False)
         )
 
-        # Poner nombre “bonito” si existe catálogo (por versión)
         if sel_version != "Todas":
             resumen["Carrera (display)"] = resumen["Carrera"].apply(
                 lambda c: _display_from_canon(c, sel_version, map_canon_to_display)
@@ -606,7 +748,12 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
             hide_index=True,
         )
 
-        ch = _bar_h(resumen.rename(columns={"Carrera (display)": "Carrera"}), "Carrera", "Porcentaje", "Porcentaje de acierto (0–100)")
+        ch = _bar_h(
+            resumen.rename(columns={"Carrera (display)": "Carrera"}),
+            "Carrera",
+            "Porcentaje",
+            "Porcentaje de acierto (0–100)",
+        )
         if ch is not None:
             st.altair_chart(ch, use_container_width=True)
         return
@@ -621,17 +768,12 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
         st.warning("No hay carreras con datos para la versión seleccionada.")
         return
 
-    # Mostrar selector con nombres “bonitos” si hay catálogo
-    opciones_display = [
-        _display_from_canon(c, sel_version, map_canon_to_display) for c in carreras_canon
-    ]
-    # Evitar duplicados display (por si el catálogo repite)
-    # Si duplica, se verá igual, pero resolvemos al canon por índice.
+    opciones_display = [_display_from_canon(c, sel_version, map_canon_to_display) for c in carreras_canon]
     sel_display = st.selectbox("Selecciona la carrera", opciones_display, index=0)
     idx = opciones_display.index(sel_display)
     sel_carrera_canon = carreras_canon[idx]
 
-    prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df = _detalle_carrera(
+    prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df, exam_pub = _detalle_carrera(
         df_v, base_v, ba_v, sel_carrera_canon, sel_version
     )
 
@@ -642,15 +784,32 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
     c4.metric("Alumnos que respondieron", f"{n_al:,}")
 
     st.divider()
-    st.markdown("### Promedio por área (0–10)")
-    st.dataframe(area_df, use_container_width=True, hide_index=True)
-    ch_a = _bar_h(area_df, "Area", "Promedio_area", "Promedio (0–10)")
-    if ch_a is not None:
-        st.altair_chart(ch_a, use_container_width=True)
 
-    st.divider()
-    st.markdown("### Promedio por materia (0–10)")
-    st.dataframe(materia_df, use_container_width=True, hide_index=True)
-    ch_m = _bar_h(materia_df, "Materia", "Promedio_materia", "Promedio (0–10)")
-    if ch_m is not None:
-        st.altair_chart(ch_m, use_container_width=True)
+    tab1, tab2, tab3 = st.tabs(["Resultados", "Examen por área", "Examen por materia"])
+
+    with tab1:
+        st.markdown("### Promedio por área (0–10)")
+        st.dataframe(area_df, use_container_width=True, hide_index=True)
+        ch_a = _bar_h(area_df, "Area", "Promedio_area", "Promedio (0–10)")
+        if ch_a is not None:
+            st.altair_chart(ch_a, use_container_width=True)
+
+        st.divider()
+
+        st.markdown("### Promedio por materia (0–10)")
+        st.dataframe(materia_df, use_container_width=True, hide_index=True)
+        ch_m = _bar_h(materia_df, "Materia", "Promedio_materia", "Promedio (0–10)")
+        if ch_m is not None:
+            st.altair_chart(ch_m, use_container_width=True)
+
+    with tab2:
+        _render_tab_examen_por_area(
+            exam_pub=exam_pub,
+            filename_prefix=f"examen_{sel_version}_{sel_carrera_canon}",
+        )
+
+    with tab3:
+        _render_tab_examen_por_materia(
+            exam_pub=exam_pub,
+            filename_prefix=f"examen_{sel_version}_{sel_carrera_canon}",
+        )
