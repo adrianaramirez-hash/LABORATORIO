@@ -5,8 +5,12 @@ import gspread
 import textwrap
 import re
 import altair as alt
+import unicodedata
 
 SHEET_BASE = "BASE"
+
+# Columna “definitiva” para filtrar por carrera/servicio en el ecosistema
+COL_CARRERA_OFICIAL = "carrera_oficial"
 
 
 def _to_float(x):
@@ -37,17 +41,24 @@ def _wrap_text(s: str, width: int = 40, max_lines: int = 2) -> str:
     return "\n".join(kept)
 
 
+def _strip_accents(s: str) -> str:
+    # Convierte áéíóúñ -> aeioun (y similares)
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
+
 def _norm_text(s: str) -> str:
     if s is None or (isinstance(s, float) and pd.isna(s)):
         return ""
-    s = str(s).strip().lower()
+    s = str(s).replace("\u00A0", " ").replace("\u200B", "").strip().lower()
+    s = _strip_accents(s)
     s = re.sub(r"\s+", " ", s)
     return s
 
 
 def _norm_key(s: str) -> str:
     s = _norm_text(s)
-    s = re.sub(r"[^a-z0-9 ]+", "", s)
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -200,15 +211,27 @@ def _make_line_chart(df_line: pd.DataFrame, x: str, y: str, title: str):
     if df_line.empty:
         st.info("No hay datos suficientes para graficar con los filtros actuales.")
         return
+
+    # Para que no “se vea plana”: ajustamos dominio del eje Y al rango real con un padding.
+    yvals = pd.to_numeric(df_line[y], errors="coerce").dropna()
+    y_min, y_max = (yvals.min(), yvals.max()) if not yvals.empty else (None, None)
+    scale = None
+    if y_min is not None and y_max is not None and pd.notna(y_min) and pd.notna(y_max):
+        if float(y_max) == float(y_min):
+            pad = 1.0
+        else:
+            pad = max(0.25, (float(y_max) - float(y_min)) * 0.15)
+        scale = alt.Scale(domain=[float(y_min) - pad, float(y_max) + pad])
+
     chart = (
         alt.Chart(df_line)
-        .mark_line(point=True)
+        .mark_line(point=alt.OverlayMarkDef(size=70))
         .encode(
             x=alt.X(f"{x}:O", sort=df_line[x].tolist(), title="Ciclo"),
-            y=alt.Y(f"{y}:Q", title="Promedio"),
-            tooltip=[x, y],
+            y=alt.Y(f"{y}:Q", title="Promedio", scale=scale),
+            tooltip=[alt.Tooltip(x, title="Ciclo"), alt.Tooltip(y, title="Promedio", format=".2f")],
         )
-        .properties(height=300, title=title)
+        .properties(height=320, title=title)
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -238,10 +261,15 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
         st.warning("La hoja BASE está vacía.")
         return
 
-    required = {"profesor", "grupo", "materia", "carrera", "aplicaron", "total", "promedio", "ciclo"}
+    # Requeridos (carrera_oficial es la clave del ecosistema)
+    required = {"profesor", "grupo", "materia", "aplicaron", "total", "promedio", "ciclo", COL_CARRERA_OFICIAL}
     missing = [c for c in required if c not in df.columns]
     if missing:
-        st.error(f"Faltan columnas en BASE: {', '.join(missing)}")
+        st.error(
+            "Faltan columnas en BASE: "
+            + ", ".join(missing)
+            + ".\n\nAsegúrate de tener la columna 'carrera_oficial' creada en BASE."
+        )
         return
 
     df = df.copy()
@@ -250,8 +278,9 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
     df["promedio"] = df["promedio"].apply(_to_float)
     df["participacion_pct"] = [_safe_percent(n, d) for n, d in zip(df["aplicaron"], df["total"])]
 
+    # Claves: profesor siempre; carrera SIEMPRE desde carrera_oficial
     df["_prof_key"] = df["profesor"].apply(_norm_key)
-    df["_car_key"] = df["carrera"].apply(_norm_key)
+    df["_car_key"] = df[COL_CARRERA_OFICIAL].apply(_norm_key)
 
     ciclos = df["ciclo"].dropna().astype(str).str.strip().unique().tolist()
     ciclos = sorted(ciclos, key=_cycle_sort_key)
@@ -259,29 +288,34 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
         st.warning("No encontré valores de ciclo.")
         return
 
-    c1, c2, c3 = st.columns([1.0, 1.4, 1.0])
+    c1, c2, c3 = st.columns([1.0, 1.7, 1.0])
     with c1:
         ciclo_sel = st.selectbox("Ciclo", ciclos, index=max(0, len(ciclos) - 1))
 
+    # Base del ciclo para armar selector DG de carreras_oficial
+    base_ciclo = df[df["ciclo"].astype(str).str.strip() == str(ciclo_sel).strip()].copy()
+
     if vista == "Dirección General":
         with c2:
-            base_ciclo = df[df["ciclo"].astype(str).str.strip() == str(ciclo_sel).strip()].copy()
-            carreras = sorted(base_ciclo["carrera"].dropna().astype(str).str.strip().unique().tolist())
+            carreras = sorted(base_ciclo[COL_CARRERA_OFICIAL].dropna().astype(str).str.strip().unique().tolist())
             carrera_opts = ["(Todas)"] + carreras
-            carrera_sel = st.selectbox("Carrera", carrera_opts, index=0)
+            carrera_sel = st.selectbox("Carrera/Servicio", carrera_opts, index=0)
             carrera_key_sel = "" if carrera_sel == "(Todas)" else _norm_key(carrera_sel)
     else:
         carrera_sel = (carrera or "").strip()
         carrera_key_sel = _norm_key(carrera_sel)
         with c2:
-            st.text_input("Carrera (fija por vista)", value=carrera_sel, disabled=True)
+            st.text_input("Carrera/Servicio (fija por vista)", value=carrera_sel, disabled=True)
 
     with c3:
         umbral = st.number_input("Umbral de alerta (≤)", min_value=0, max_value=100, value=79, step=1)
 
     st.divider()
 
-    f = df[df["ciclo"].astype(str).str.strip() == str(ciclo_sel).strip()].copy()
+    # Filtro por ciclo
+    f = base_ciclo.copy()
+
+    # Filtro por carrera (si DG eligió una; DC siempre filtra)
     if vista == "Dirección General":
         if carrera_key_sel:
             f = f[f["_car_key"] == carrera_key_sel]
@@ -291,9 +325,9 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
     if vista != "Dirección General" and len(f) == 0:
         st.error("No hay registros para tu carrera con el filtro actual.")
         st.caption(f"Carrera (DC): '{carrera_sel}' | clave usada: '{carrera_key_sel}'")
-        uniques = sorted(df["carrera"].dropna().astype(str).str.strip().unique().tolist())
-        st.caption("Ejemplos de carreras en la base (para comparar):")
-        st.dataframe(pd.DataFrame({"carrera": uniques[:25]}), use_container_width=True)
+        uniques = sorted(base_ciclo[COL_CARRERA_OFICIAL].dropna().astype(str).str.strip().unique().tolist())
+        st.caption("Ejemplos de carrera_oficial en la base (para comparar):")
+        st.dataframe(pd.DataFrame({COL_CARRERA_OFICIAL: uniques[:25]}), use_container_width=True)
         return
 
     st.caption(f"Registros filtrados (ciclo): **{len(f)}**")
@@ -317,6 +351,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
 
     st.divider()
 
+    # Observaciones (se mantiene, pero su “carrera” puede no venir normalizada como carrera_oficial)
     oc_df, oc_fecha_col = _load_observaciones_df_from_secret()
     oc_has_data = not oc_df.empty
 
@@ -341,20 +376,27 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
     tabs = ["Resumen", "Tendencia", "Focos rojos", "Top docentes", "Vinculación con Observación"]
     tab1, tabT, tab2, tabTop, tab3 = st.tabs(tabs)
 
+    # ---------------------------
+    # Resumen
+    # ---------------------------
     with tab1:
         if vista == "Dirección General" and (carrera_key_sel == ""):
-            st.markdown("### Promedio por carrera — tabla (ciclo)")
+            st.markdown("### Promedio por carrera/servicio — tabla (ciclo)")
             rows = []
-            for car, dfx in f.groupby("carrera"):
+            for car, dfx in f.groupby(COL_CARRERA_OFICIAL):
                 prom = pd.to_numeric(dfx["promedio"], errors="coerce").mean()
                 part = _safe_percent(
                     pd.to_numeric(dfx["aplicaron"], errors="coerce").sum(),
                     pd.to_numeric(dfx["total"], errors="coerce").sum(),
                 )
                 alert_cnt = (pd.to_numeric(dfx["promedio"], errors="coerce") <= float(umbral)).sum()
-                rows.append({"Carrera": str(car).strip(), "Promedio": float(prom) if pd.notna(prom) else pd.NA,
-                             "Participación %": float(part) if pd.notna(part) else pd.NA, "Grupos": int(len(dfx)),
-                             "Casos en alerta": int(alert_cnt)})
+                rows.append({
+                    "Carrera/Servicio": str(car).strip(),
+                    "Promedio": float(prom) if pd.notna(prom) else pd.NA,
+                    "Participación %": float(part) if pd.notna(part) else pd.NA,
+                    "Grupos": int(len(dfx)),
+                    "Casos en alerta": int(alert_cnt),
+                })
             out = pd.DataFrame(rows).sort_values("Promedio", ascending=False, na_position="last")
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
         else:
@@ -367,15 +409,24 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                     pd.to_numeric(dfx["total"], errors="coerce").sum(),
                 )
                 alerts = (pd.to_numeric(dfx["promedio"], errors="coerce") <= float(umbral)).sum()
-                rows.append({"Profesor": prof, "Promedio (ponderado)": prom_w, "Participación %": float(part) if pd.notna(part) else pd.NA,
-                             "Grupos": int(len(dfx)), "Casos en alerta": int(alerts)})
+                rows.append({
+                    "Profesor": prof,
+                    "Promedio (ponderado)": prom_w,
+                    "Participación %": float(part) if pd.notna(part) else pd.NA,
+                    "Grupos": int(len(dfx)),
+                    "Casos en alerta": int(alerts),
+                })
             out = pd.DataFrame(rows).sort_values("Promedio (ponderado)", ascending=False, na_position="last")
             out["Profesor"] = out["Profesor"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
+    # ---------------------------
+    # Tendencia (por ciclos)
+    # ---------------------------
     with tabT:
         st.markdown("### Tendencia por ciclos — promedio")
         trend_base = df.copy()
+
         if vista == "Dirección General":
             if carrera_key_sel:
                 trend_base = trend_base[trend_base["_car_key"] == carrera_key_sel]
@@ -390,6 +441,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
         for cyc, dfx in trend_base.groupby("ciclo"):
             prom = pd.to_numeric(dfx["promedio"], errors="coerce").mean()
             rows.append({"ciclo": str(cyc).strip(), "promedio": float(prom) if pd.notna(prom) else pd.NA})
+
         df_line = pd.DataFrame(rows)
         if df_line.empty:
             st.info("No hay datos suficientes para tendencia.")
@@ -399,6 +451,9 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             _make_line_chart(df_line, x="ciclo", y="promedio", title=title)
             st.dataframe(df_line.reset_index(drop=True), use_container_width=True)
 
+    # ---------------------------
+    # Focos rojos
+    # ---------------------------
     with tab2:
         st.markdown("### Casos con promedio ≤ umbral — detalle (ciclo)")
         focos = f[pd.to_numeric(f["promedio"], errors="coerce") <= float(umbral)].copy()
@@ -409,16 +464,21 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             focos["Observación encontrada"] = ""
             if oc_has_data and oc_prof_col:
                 oc_sub = oc_df.copy()
+                # Intento de acotar observaciones por carrera (si la carrera en OC coincide ya normalizada)
                 if oc_car_col and carrera_key_sel:
                     oc_sub = oc_sub[oc_sub["_car_key"] == carrera_key_sel]
                 oc_keys = set(oc_sub["_prof_key"].dropna().tolist())
                 focos["Observación encontrada"] = focos["_prof_key"].apply(lambda k: "Sí" if k in oc_keys else "No")
+
             show_cols = ["profesor", "materia", "grupo", "promedio", "Participación %", "ciclo", "Observación encontrada"]
             out = focos[show_cols].copy()
             out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
             out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
+    # ---------------------------
+    # Top docentes
+    # ---------------------------
     with tabTop:
         st.markdown("### Top docentes — ranking (ciclo)")
         cmin1, cmin2 = st.columns([1, 1])
@@ -439,9 +499,12 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             if pd.notna(part_prof) and float(part_prof) < float(min_part):
                 continue
             prom_w = _promedio_ponderado(dfx)
-            rows.append({"Profesor": prof, "Promedio (ponderado)": prom_w,
-                         "Participación %": float(part_prof) if pd.notna(part_prof) else pd.NA,
-                         "Grupos": int(grupos_prof)})
+            rows.append({
+                "Profesor": prof,
+                "Promedio (ponderado)": prom_w,
+                "Participación %": float(part_prof) if pd.notna(part_prof) else pd.NA,
+                "Grupos": int(grupos_prof),
+            })
 
         out = pd.DataFrame(rows)
         if out.empty:
@@ -451,6 +514,9 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             out["Profesor"] = out["Profesor"].apply(lambda x: _wrap_text(x, width=50, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
+    # ---------------------------
+    # Vinculación con Observación
+    # ---------------------------
     with tab3:
         st.markdown("### Vinculación (Evaluación Docente → Observación de clases)")
         if not oc_has_data:
@@ -490,12 +556,13 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
         cols_to_show.append(oc_prof_col)
         if oc_car_col and oc_car_col in oc_sub.columns:
             cols_to_show.append(oc_car_col)
-        oc_res_col = _pick_result_col_oc(oc_sub)
-        oc_link_col = _pick_link_col_oc(oc_sub)
-        if oc_res_col and oc_res_col in oc_sub.columns:
-            cols_to_show.append(oc_res_col)
-        if oc_link_col and oc_link_col in oc_sub.columns:
-            cols_to_show.append(oc_link_col)
+
+        oc_res_col2 = _pick_result_col_oc(oc_sub)
+        oc_link_col2 = _pick_link_col_oc(oc_sub)
+        if oc_res_col2 and oc_res_col2 in oc_sub.columns:
+            cols_to_show.append(oc_res_col2)
+        if oc_link_col2 and oc_link_col2 in oc_sub.columns:
+            cols_to_show.append(oc_link_col2)
 
         out = oc_sub[cols_to_show].copy()
         if oc_fecha_col and oc_fecha_col in out.columns:
@@ -504,7 +571,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
         out[oc_prof_col] = out[oc_prof_col].apply(lambda x: _wrap_text(x, width=40, max_lines=2))
         if oc_car_col and oc_car_col in out.columns:
             out[oc_car_col] = out[oc_car_col].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
-        if oc_link_col and oc_link_col in out.columns:
-            out[oc_link_col] = out[oc_link_col].astype(str).apply(lambda x: _wrap_text(x, width=55, max_lines=2))
+        if oc_link_col2 and oc_link_col2 in out.columns:
+            out[oc_link_col2] = out[oc_link_col2].astype(str).apply(lambda x: _wrap_text(x, width=55, max_lines=2))
 
         st.dataframe(out.reset_index(drop=True), use_container_width=True)
