@@ -183,7 +183,6 @@ def _get_logged_in_email() -> str:
 def _show_traceback_expander(title: str = "Ver detalle técnico (diagnóstico)"):
     """Muestra el traceback completo en un expander (sin depender de DEBUG)."""
     import traceback
-
     with st.expander(title):
         st.code(traceback.format_exc())
 
@@ -530,10 +529,8 @@ try:
         observacion_clases.render_observacion_clases(vista=vista, carrera=carrera)
 
     elif seccion == "Evaluación docente":
-        # ✅ NUEVO: render real del módulo
-        # NOTA: El módulo toma la URL de Evaluación Docente desde Secrets (EDOCENTE_URL)
-        # o puedes pasarla aquí. Como ya me compartiste la URL, puedes dejarla hardcodeada
-        # mientras pruebas, o moverla a Secrets.
+        # ✅ Evaluación docente (URL hardcodeada para pruebas)
+        # Recomendación: mover a Secrets como EDOCENTE_URL y aquí omitir ed_url.
         evaluacion_docente.render_evaluacion_docente(
             vista=vista,
             carrera=carrera,
@@ -560,7 +557,6 @@ try:
         )
 
     elif seccion == "Aulas virtuales":
-        # Diagnóstico específico: evita que se quede en el mensaje genérico
         try:
             aulas_virtuales.mostrar(vista=vista, carrera=carrera)
         except Exception as e:
