@@ -438,6 +438,10 @@ st.divider()
 # Catálogo maestro en memoria (disponible para módulos)
 # ============================================================
 df_cat_carreras = get_cat_carreras_df()
+
+# ✅ CLAVE: ponerlo en session_state para que lo lean los módulos
+st.session_state["df_cat_carreras"] = df_cat_carreras
+
 # (Opcional) diagnosticar si está vacío
 if df_cat_carreras.empty:
     st.caption("Nota: CAT_CARRERAS aún no está disponible o no se pudo cargar (esto no bloquea la app).")
@@ -590,7 +594,6 @@ try:
         )
 
     elif seccion == "Aulas virtuales":
-        # Diagnóstico específico: evita que se quede en el mensaje genérico
         try:
             aulas_virtuales.mostrar(vista=vista, carrera=carrera)
         except Exception as e:
