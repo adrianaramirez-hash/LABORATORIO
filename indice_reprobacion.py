@@ -4,6 +4,8 @@ import streamlit as st
 import altair as alt
 import gspread
 
+from catalogos import mapear_carrera_id
+
 # =========================================
 # Config
 # =========================================
@@ -58,9 +60,6 @@ def _load_reprobacion_from_gsheets(url: str, sheet_name: str | None = None) -> p
     cal_col = _pick_col(df, ["CALIF FINAL", "CALIF_FINAL", "CALIFICACION FINAL", "CALIFICACIÓN FINAL"])
     if cal_col and cal_col != "CALIF_FINAL":
         df = df.rename(columns={cal_col: "CALIF_FINAL"})
-    elif cal_col is None:
-        # si no existe, la dejamos (pero avisaremos en UI)
-        pass
 
     # Normalizar MATERIA
     mat_col = _pick_col(df, ["MATERIA", "ASIGNATURA"])
@@ -110,13 +109,32 @@ def _bar_top_materias(df_mat: pd.DataFrame, top_n: int = 20):
     return chart
 
 
+def _get_catalogo_carreras_df() -> pd.DataFrame:
+    """
+    Toma el catálogo maestro desde session_state.
+    NOTA: app.py debe setear st.session_state["df_cat_carreras"] = df_cat_carreras
+    """
+    df_cat = st.session_state.get("df_cat_carreras")
+    if df_cat is None or getattr(df_cat, "empty", True):
+        return pd.DataFrame()
+    return df_cat
+
+
+def _compute_carrera_id_para_registro(area_text: str, df_cat: pd.DataFrame):
+    if not area_text or df_cat.empty:
+        return None
+    try:
+        return mapear_carrera_id(area_text, df_cat)
+    except Exception:
+        return None
+
+
 # =========================================
 # Render principal
 # =========================================
 def render_indice_reprobacion(vista: str | None = None, carrera: str | None = None):
     st.subheader("Índice de reprobación (base de reprobados)")
 
-    # Nota clave (para no confundir a Dirección)
     st.info(
         "Esta base contiene registros de reprobación. Aquí verás **conteos y tendencias de reprobados**. "
         "El **índice (%) real** requiere el total de evaluados/inscritos por materia y ciclo."
@@ -165,6 +183,19 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     if "MATRICULA" in df.columns:
         df["MATRICULA"] = df["MATRICULA"].astype(str).str.strip()
 
+    # =========================================
+    # Catálogo maestro y carrera_id
+    # =========================================
+    df_cat = _get_catalogo_carreras_df()
+
+    # Creamos una columna calculada CARRERA_ID para cada registro (solo si hay catálogo)
+    if not df_cat.empty:
+        # Ojo: esto puede tardar si hay muchos registros, pero en reprobación suele ser manejable.
+        # Si creciera, lo optimizamos con cache/memoización.
+        df["CARRERA_ID"] = df["AREA"].apply(lambda x: _compute_carrera_id_para_registro(x, df_cat))
+    else:
+        df["CARRERA_ID"] = None
+
     # ---------------------------
     # Filtros (replicando patrón vista/carrera)
     # ---------------------------
@@ -190,8 +221,14 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
                 niv_sel = "(Todos)"
 
         with c3:
-            area_opts = ["(Todas)"] + sorted(f["AREA"].dropna().astype(str).str.strip().unique().tolist())
-            area_sel = st.selectbox("Carrera/Servicio", area_opts, index=0)
+            # Si hay catálogo, mostramos nombres oficiales para seleccionar
+            if not df_cat.empty:
+                nombres_oficiales = sorted(df_cat["nombre_oficial"].dropna().astype(str).unique().tolist())
+                area_opts = ["(Todas)"] + nombres_oficiales
+                area_sel = st.selectbox("Carrera/Servicio", area_opts, index=0)
+            else:
+                area_opts = ["(Todas)"] + sorted(f["AREA"].dropna().astype(str).str.strip().unique().tolist())
+                area_sel = st.selectbox("Carrera/Servicio", area_opts, index=0)
 
         with c4:
             ciclo_opts = ["(Todos)"] + sorted(f["CICLO"].dropna().astype(str).str.strip().unique().tolist())
@@ -201,8 +238,19 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
             f = f[f["ESCUELA"].astype(str).str.strip() == esc_sel]
         if "NIVEL" in f.columns and niv_sel != "(Todos)":
             f = f[f["NIVEL"].astype(str).str.strip() == niv_sel]
+
+        # Filtro por carrera (vía carrera_id si hay catálogo)
         if area_sel != "(Todas)":
-            f = f[f["AREA"].astype(str).str.strip() == area_sel]
+            if not df_cat.empty:
+                carrera_id_sel = mapear_carrera_id(area_sel, df_cat)
+                if carrera_id_sel is not None:
+                    f = f[f["CARRERA_ID"] == carrera_id_sel]
+                else:
+                    # si por alguna razón no mapea, cae a texto
+                    f = f[f["AREA"].astype(str).str.strip() == area_sel]
+            else:
+                f = f[f["AREA"].astype(str).str.strip() == area_sel]
+
         if ciclo_sel != "(Todos)":
             f = f[f["CICLO"].astype(str).str.strip() == ciclo_sel]
 
@@ -214,7 +262,16 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         ciclo_opts = ["(Todos)"] + sorted(f["CICLO"].dropna().astype(str).str.strip().unique().tolist())
         ciclo_sel = st.selectbox("Ciclo", ciclo_opts, index=0)
 
-        f = f[f["AREA"].astype(str).str.strip() == carrera_fix]
+        if not df_cat.empty:
+            carrera_id_fix = mapear_carrera_id(carrera_fix, df_cat)
+            if carrera_id_fix is not None:
+                f = f[f["CARRERA_ID"] == carrera_id_fix]
+            else:
+                # fallback por texto si no mapea
+                f = f[f["AREA"].astype(str).str.strip() == carrera_fix]
+        else:
+            f = f[f["AREA"].astype(str).str.strip() == carrera_fix]
+
         if ciclo_sel != "(Todos)":
             f = f[f["CICLO"].astype(str).str.strip() == ciclo_sel]
 
@@ -241,9 +298,7 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     top_materia = (
         f.groupby("MATERIA")["MATRICULA"].nunique().sort_values(ascending=False).index[0]
         if "MATRICULA" in f.columns and f["MATERIA"].notna().any()
-        else (
-            f["MATERIA"].value_counts().index[0] if f["MATERIA"].notna().any() else "—"
-        )
+        else (f["MATERIA"].value_counts().index[0] if f["MATERIA"].notna().any() else "—")
     )
     c4.metric("Materia con más reprobados", str(top_materia))
 
@@ -296,14 +351,20 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
 
     materia_sel = st.selectbox("Materia", ["(Selecciona)"] + df_mat["MATERIA"].tolist(), index=0)
     if materia_sel != "(Selecciona)":
+        # Para histórico, usamos el df completo, pero respetando filtros de carrera (vía carrera_id si aplica)
         fh = df[df["MATERIA"].astype(str).str.strip() == str(materia_sel).strip()].copy()
 
-        # Respetar también el filtro de AREA si aplica
         if vista != "Dirección General":
-            fh = fh[fh["AREA"].astype(str).str.strip() == (carrera or "").strip()]
+            if not df_cat.empty:
+                carrera_id_fix = mapear_carrera_id((carrera or "").strip(), df_cat)
+                if carrera_id_fix is not None:
+                    fh = fh[fh["CARRERA_ID"] == carrera_id_fix]
+                else:
+                    fh = fh[fh["AREA"].astype(str).str.strip() == (carrera or "").strip()]
+            else:
+                fh = fh[fh["AREA"].astype(str).str.strip() == (carrera or "").strip()]
         else:
-            # si DG filtró AREA, se mantiene vía f; aquí replicamos ese filtro aplicando intersección con f
-            # (simplemente usamos los ciclos disponibles dentro de f para esa materia)
+            # En DG usamos f para mantener consistencia con filtros actuales
             fh = f[f["MATERIA"].astype(str).str.strip() == str(materia_sel).strip()].copy()
 
         if fh.empty:
@@ -325,7 +386,10 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
             .encode(
                 x=alt.X("CICLO:N", title="Ciclo", sort=None),
                 y=alt.Y("REPROBADOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
-                tooltip=[alt.Tooltip("CICLO:N", title="Ciclo"), alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos")],
+                tooltip=[
+                    alt.Tooltip("CICLO:N", title="Ciclo"),
+                    alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos"),
+                ],
             )
             .properties(height=360)
         )
