@@ -13,6 +13,7 @@ import gspread
 import json
 import re
 from google.oauth2.service_account import Credentials
+from catalogos import cargar_cat_carreras_desde_gsheets
 
 # ============================================================
 # Configuración básica (antes de cualquier st.*)
@@ -189,6 +190,32 @@ def _show_traceback_expander(title: str = "Ver detalle técnico (diagnóstico)")
 
 
 # ============================================================
+# Cliente gspread global (reutilizable)
+# ============================================================
+@st.cache_resource(show_spinner=False)
+def get_gspread_client():
+    creds_dict = _load_creds_dict()
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    return gspread.authorize(creds)
+
+
+# ============================================================
+# Catálogo maestro: carreras (cacheado)
+# ============================================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_cat_carreras_df():
+    """
+    Carga el catálogo maestro CAT_CARRERAS.
+    No detiene la app si falla (deja DF vacío), porque primero estabilizamos baseline.
+    """
+    try:
+        gc = get_gspread_client()
+        return cargar_cat_carreras_desde_gsheets(gc)
+    except Exception:
+        return pd.DataFrame(columns=["carrera_id", "nombre_oficial", "variantes", "variante_norm"])
+
+
+# ============================================================
 # Lectura de ACCESOS (cacheada, pero forzamos lectura fresca al login con .clear())
 # ============================================================
 @st.cache_data(ttl=120, show_spinner=False)
@@ -196,8 +223,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     creds_dict = _load_creds_dict()
     sa_email = creds_dict.get("client_email", "")
 
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
+    client = get_gspread_client()
 
     sheet_id = _extract_sheet_id(ACCESOS_SHEET_URL)
     sh = client.open_by_key(sheet_id)
@@ -409,6 +435,14 @@ with c2:
 st.divider()
 
 # ============================================================
+# Catálogo maestro en memoria (disponible para módulos)
+# ============================================================
+df_cat_carreras = get_cat_carreras_df()
+# (Opcional) diagnosticar si está vacío
+if df_cat_carreras.empty:
+    st.caption("Nota: CAT_CARRERAS aún no está disponible o no se pudo cargar (esto no bloquea la app).")
+
+# ============================================================
 # Contexto de usuario (DG vs DC)
 # ============================================================
 ROL = st.session_state["user_rol"]
@@ -530,10 +564,6 @@ try:
         observacion_clases.render_observacion_clases(vista=vista, carrera=carrera)
 
     elif seccion == "Evaluación docente":
-        # ✅ NUEVO: render real del módulo
-        # NOTA: El módulo toma la URL de Evaluación Docente desde Secrets (EDOCENTE_URL)
-        # o puedes pasarla aquí. Como ya me compartiste la URL, puedes dejarla hardcodeada
-        # mientras pruebas, o moverla a Secrets.
         evaluacion_docente.render_evaluacion_docente(
             vista=vista,
             carrera=carrera,
