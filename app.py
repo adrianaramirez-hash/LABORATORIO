@@ -439,12 +439,15 @@ st.divider()
 # ============================================================
 df_cat_carreras = get_cat_carreras_df()
 
-# ✅ CLAVE: ponerlo en session_state para que lo lean los módulos
+# CLAVE: ponerlo en session_state para que lo lean los módulos
 st.session_state["df_cat_carreras"] = df_cat_carreras
 
 # (Opcional) diagnosticar si está vacío
 if df_cat_carreras.empty:
-    st.caption("Nota: CAT_CARRERAS aún no está disponible o no se pudo cargar (esto no bloquea la app).")
+    st.caption(
+        "Nota: CAT_CARRERAS aún no está disponible o no se pudo cargar "
+        "(esto no bloquea la app)."
+    )
 
 # ============================================================
 # Contexto de usuario (DG vs DC)
