@@ -65,6 +65,21 @@ def _norm_sheet_title(x: str) -> str:
     return str(x).strip().lower().replace(" ", "").replace("_", "")
 
 
+def _norm_text(s: str) -> str:
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    s = str(s).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _norm_key(s: str) -> str:
+    s = _norm_text(s)
+    s = re.sub(r"[^a-z0-9 ]+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
 def _clean_service_name(x: str) -> str:
     """Normalización suave para nombres de servicio/carrera."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
@@ -175,12 +190,6 @@ def _bar(df: pd.DataFrame, title: str):
     st.altair_chart(chart, use_container_width=True)
 
 
-def _norm_text(s: str) -> str:
-    if s is None or (isinstance(s, float) and pd.isna(s)):
-        return ""
-    return str(s).strip().lower()
-
-
 def _classify_text(s: str, cats: dict) -> str:
     t = _norm_text(s)
     if not t:
@@ -248,9 +257,6 @@ Columnas:
 - **Sí, pero incompletas = 1**
 - **Sí, todas las secciones = 2**
 
-**% Definición completa:** valor **2**.  
-**% Definición NO realizada:** valor **0**.
-
 Columna:
 - `definicion_curso_num`
 
@@ -299,6 +305,71 @@ Columna:
         )
 
 
+def _ensure_enrichment(df: pd.DataFrame, cat: pd.DataFrame) -> pd.DataFrame:
+    """
+    Preferencia:
+      1) Usar columnas ya calculadas en el FORM: servicio_norm, escuela, nivel.
+      2) Si faltan, enriquecer desde catálogo usando 'Indica el servicio' vs cat.servicio (fallback).
+    """
+    df = df.copy()
+    cat = cat.copy()
+
+    # Normalizaciones base
+    if "Indica el servicio" in df.columns:
+        df["servicio_std"] = df["Indica el servicio"].apply(_clean_service_name)
+    else:
+        df["servicio_std"] = ""
+
+    # Si ya existen (tu caso), solo normalizamos keys
+    if "servicio_norm" in df.columns:
+        df["servicio_key"] = df["servicio_norm"].apply(_norm_key)
+    else:
+        df["servicio_key"] = df["servicio_std"].apply(_norm_key)
+
+    for col in ["escuela", "nivel"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    # Si ya viene lleno, no hacemos nada más
+    if df["escuela"].notna().any() and df["nivel"].notna().any():
+        df["escuela_key"] = df["escuela"].apply(_norm_key)
+        return df
+
+    # Fallback: enriquecer por merge con catálogo si falta algo
+    if "servicio" not in cat.columns:
+        return df
+
+    cat["servicio_std"] = cat["servicio"].apply(_clean_service_name)
+    for col in ["escuela", "nivel", "tipo_unidad", "servicio_norm"]:
+        if col not in cat.columns:
+            cat[col] = pd.NA
+
+    df = df.merge(
+        cat[["servicio_std", "escuela", "nivel", "tipo_unidad", "servicio_norm"]],
+        on="servicio_std",
+        how="left",
+        suffixes=("", "_cat"),
+    )
+
+    # Completar si quedaron duplicados por suffix
+    if "escuela_cat" in df.columns:
+        df["escuela"] = df["escuela"].fillna(df["escuela_cat"])
+        df.drop(columns=["escuela_cat"], inplace=True, errors="ignore")
+    if "nivel_cat" in df.columns:
+        df["nivel"] = df["nivel"].fillna(df["nivel_cat"])
+        df.drop(columns=["nivel_cat"], inplace=True, errors="ignore")
+    if "servicio_norm_cat" in df.columns and "servicio_norm" in df.columns:
+        df["servicio_norm"] = df["servicio_norm"].fillna(df["servicio_norm_cat"])
+        df.drop(columns=["servicio_norm_cat"], inplace=True, errors="ignore")
+
+    if "servicio_norm" in df.columns:
+        df["servicio_key"] = df["servicio_norm"].apply(_norm_key)
+
+    df["escuela_key"] = df["escuela"].apply(_norm_key)
+
+    return df
+
+
 def mostrar(vista: str, carrera: str | None = None):
     st.subheader("Aulas virtuales")
 
@@ -321,86 +392,97 @@ def mostrar(vista: str, carrera: str | None = None):
         st.warning("La hoja CAT_SERVICIOS_ESTRUCTURA está vacía.")
         return
 
-    # Validaciones mínimas
+    # Validación mínima
     if "Indica el servicio" not in df.columns:
         st.error("En AULAS_VIRTUALES_FORM falta la columna exacta: 'Indica el servicio'")
         st.dataframe(df.head(20), use_container_width=True)
         return
-    if "servicio" not in cat.columns:
-        st.error("En CAT_SERVICIOS_ESTRUCTURA falta la columna exacta: 'servicio'")
-        st.dataframe(cat.head(20), use_container_width=True)
-        return
 
-    # ---------------------------
-    # Normalización + join de catálogo
-    # ---------------------------
-    df = df.copy()
-    cat = cat.copy()
+    # Enriquecimiento robusto (usa servicio_norm/escuela/nivel si ya existen)
+    df = _ensure_enrichment(df, cat)
 
-    df["servicio_std"] = df["Indica el servicio"].apply(_clean_service_name)
-    cat["servicio_std"] = cat["servicio"].apply(_clean_service_name)
-
-    for col in ["escuela", "nivel", "tipo_unidad"]:
-        if col not in cat.columns:
-            cat[col] = pd.NA
-
-    df = df.merge(
-        cat[["servicio_std", "escuela", "nivel", "tipo_unidad"]],
-        on="servicio_std",
-        how="left",
-    )
-
-    # ---------------------------
-    # Periodo (anual): usar fecha solo como contexto
-    # ---------------------------
+    # Periodo
     fecha_col = _pick_fecha_col(df)
     if fecha_col:
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
-    # Filtro: DG puede elegir; DC se fuerza a su carrera
+    # Filtro: DG puede elegir; DC se fuerza por "escuela" o por "servicio"
     # ---------------------------
-    servicio_base = _clean_service_name(carrera or "")
+    carrera_txt = (carrera or "").strip()
+    carrera_key = _norm_key(carrera_txt)
 
     if vista != "Dirección General":
-        # DC: no se permite "(Todos)" ni filtros internos por escuela
-        if not servicio_base:
-            st.error("Vista DC: no se recibió la carrera/servicio asignado.")
+        if not carrera_txt:
+            st.error("Vista DC: no se recibió el servicio/carrera/escuela asignado.")
             st.stop()
 
-        servicio_sel = servicio_base
-        f = df[df["servicio_std"] == servicio_sel].copy()
-        unidad_txt = f"Servicio: {servicio_sel}"
+        # 1) Intentar como ESCUELA (directores compactados)
+        f = df[df["escuela_key"] == carrera_key].copy()
+        if not f.empty:
+            unidad_txt = f"Escuela: {carrera_txt}"
+        else:
+            # 2) Intentar como SERVICIO (licenciatura específica)
+            f = df[df["servicio_key"] == carrera_key].copy()
+            if not f.empty:
+                unidad_txt = f"Servicio: {carrera_txt}"
+            else:
+                # 3) Último fallback: comparar el texto crudo de "Indica el servicio"
+                df["_servicio_std_key"] = df["servicio_std"].apply(_norm_key)
+                f = df[df["_servicio_std_key"] == carrera_key].copy()
+                unidad_txt = f"Servicio: {carrera_txt}"
 
         if f.empty:
-            st.warning("No hay registros para el servicio asignado (revisa que el texto coincida con 'Indica el servicio').")
-            st.caption(f"Servicio recibido desde app.py: {servicio_base}")
-            st.stop()
+            st.error("No hay registros para tu asignación (escuela/servicio) con el filtro actual.")
+            st.caption(f"Valor recibido desde app.py (DC): '{carrera_txt}'")
+            # Diagnóstico mínimo (sin saturar)
+            ejemplos_esc = sorted(df["escuela"].dropna().astype(str).unique().tolist())[:25]
+            ejemplos_srv = sorted(df.get("servicio_norm", df["servicio_std"]).dropna().astype(str).unique().tolist())[:25]
+            with st.expander("Ver ejemplos de valores en la base (diagnóstico)"):
+                st.markdown("**Ejemplos de escuela:**")
+                st.dataframe(pd.DataFrame({"escuela": ejemplos_esc}), use_container_width=True)
+                st.markdown("**Ejemplos de servicio:**")
+                st.dataframe(pd.DataFrame({"servicio": ejemplos_srv}), use_container_width=True)
+            return
 
     else:
-        # DG: selector interno con (Todos) y agrupación por escuela si aplica
         with st.container(border=True):
             st.markdown("**Filtro del apartado (Aulas Virtuales)**")
 
-            servicios_disponibles = (
-                cat["servicio_std"].dropna().astype(str).str.strip().unique().tolist()
-            )
-            servicios_disponibles = sorted(set([s for s in servicios_disponibles if s]))
+            # Selector por nivel y escuela (DG)
+            niveles = sorted(df["nivel"].dropna().astype(str).str.strip().unique().tolist())
+            escuelas = sorted(df["escuela"].dropna().astype(str).str.strip().unique().tolist())
 
-            opciones = ["(Todos)"] + servicios_disponibles
+            cA, cB, cC = st.columns([1.2, 1.4, 2.2])
+            with cA:
+                nivel_sel = st.selectbox("Nivel", ["(Todos)"] + niveles, index=0)
+            with cB:
+                escuela_sel = st.selectbox("Escuela", ["(Todas)"] + escuelas, index=0)
 
-            servicio_sel = st.selectbox(
-                "Servicio a analizar (Aulas Virtuales)",
-                options=opciones,
-                index=0,
-            )
+            # Servicio (opcional)
+            servicios = df.get("servicio_norm", df["servicio_std"]).dropna().astype(str).str.strip().unique().tolist()
+            servicios = sorted(set([s for s in servicios if s]))
+            with cC:
+                servicio_sel = st.selectbox("Servicio", ["(Todos)"] + servicios, index=0)
 
-        if servicio_sel == "(Todos)":
-            f = df.copy()
-            unidad_txt = "Todos los servicios"
-        else:
-            f = df[df["servicio_std"] == servicio_sel].copy()
-            unidad_txt = f"Servicio: {servicio_sel}"
+        f = df.copy()
+        unidad_parts = []
+
+        if nivel_sel != "(Todos)":
+            f = f[f["nivel"].astype(str).str.strip() == str(nivel_sel).strip()]
+            unidad_parts.append(f"Nivel: {nivel_sel}")
+
+        if escuela_sel != "(Todas)":
+            f = f[f["escuela"].astype(str).str.strip() == str(escuela_sel).strip()]
+            unidad_parts.append(f"Escuela: {escuela_sel}")
+
+        if servicio_sel != "(Todos)":
+            # comparamos contra servicio_norm si existe; si no, contra servicio_std
+            svc_series = df.get("servicio_norm", df["servicio_std"])
+            f = f[svc_series.astype(str).str.strip() == str(servicio_sel).strip()]
+            unidad_parts.append(f"Servicio: {servicio_sel}")
+
+        unidad_txt = " | ".join(unidad_parts) if unidad_parts else "Todos los servicios"
 
         if f.empty:
             st.warning("No hay registros con el filtro seleccionado.")
