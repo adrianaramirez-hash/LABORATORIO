@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from google.oauth2.service_account import Credentials
 import altair as alt
 
+from catalogos import mapear_carrera_id
+
 # --------------------------------------------------
 # CONEXIÓN A GOOGLE SHEETS
 # --------------------------------------------------
@@ -49,6 +51,48 @@ def cargar_datos_desde_sheets():
     df_cortes = pd.DataFrame(datos_cortes)
 
     return df_resp, df_cortes
+
+
+# --------------------------------------------------
+# CATÁLOGO (desde session_state)
+# --------------------------------------------------
+def _get_catalogo_carreras_df() -> pd.DataFrame:
+    """
+    Toma el catálogo maestro desde session_state.
+    Requiere que app.py haga:
+      st.session_state["df_cat_carreras"] = df_cat_carreras
+    """
+    df_cat = st.session_state.get("df_cat_carreras")
+    if df_cat is None or getattr(df_cat, "empty", True):
+        return pd.DataFrame()
+    return df_cat
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _build_id_to_nombre_map(df_cat: pd.DataFrame) -> dict:
+    if df_cat is None or df_cat.empty:
+        return {}
+    # Esperamos columnas: carrera_id, nombre_oficial
+    d = {}
+    if "carrera_id" in df_cat.columns and "nombre_oficial" in df_cat.columns:
+        for _, r in df_cat[["carrera_id", "nombre_oficial"]].dropna().iterrows():
+            d[str(r["carrera_id"]).strip()] = str(r["nombre_oficial"]).strip()
+    return d
+
+
+def _safe_mapear_carrera_id(area_text: str, df_cat: pd.DataFrame):
+    if not area_text or df_cat.empty:
+        return None
+    try:
+        return mapear_carrera_id(area_text, df_cat)
+    except Exception:
+        return None
+
+
+def _nombre_oficial_from_id(carrera_id: str | None, id_to_nombre: dict) -> str:
+    if not carrera_id:
+        return ""
+    return id_to_nombre.get(str(carrera_id).strip(), "")
 
 
 # --------------------------------------------------
@@ -106,11 +150,6 @@ def obtener_texto(fila, posibles_nombres):
     return ""
 
 
-def normalizar_texto(valor):
-    """Normaliza texto para comparaciones (strip + lower)."""
-    return str(valor).strip().lower() if pd.notna(valor) else ""
-
-
 # --------------------------------------------------
 # FUNCIÓN PRINCIPAL DEL DASHBOARD
 # --------------------------------------------------
@@ -136,9 +175,7 @@ def render_observacion_clases(vista: str = "Dirección General", carrera: str | 
     # LIMPIEZA BÁSICA DE DATOS
     # --------------------------------------------------
     col_fecha = "Fecha" if "Fecha" in df_respuestas.columns else "Marca temporal"
-    df_respuestas[col_fecha] = pd.to_datetime(
-        df_respuestas[col_fecha], errors="coerce", dayfirst=True
-    )
+    df_respuestas[col_fecha] = pd.to_datetime(df_respuestas[col_fecha], errors="coerce", dayfirst=True)
 
     # Columnas clave
     COL_SERVICIO = "Indica el servicio"
@@ -149,29 +186,29 @@ def render_observacion_clases(vista: str = "Dirección General", carrera: str | 
             st.error(f"No se encontró la columna '{col}' en la hoja de respuestas.")
             st.stop()
 
-    # Columna normalizada de servicio (para comparaciones robustas)
-    df_respuestas["Servicio_norm"] = df_respuestas[COL_SERVICIO].apply(normalizar_texto)
+    # --------------------------------------------------
+    # CATÁLOGO: construir CARRERA_ID y NOMBRE_OFICIAL
+    # --------------------------------------------------
+    df_cat = _get_catalogo_carreras_df()
+    id_to_nombre = _build_id_to_nombre_map(df_cat) if not df_cat.empty else {}
 
-    # Normalizamos la carrera que llega a la función (para vista director)
-    carrera_norm = None
-    if vista == "Director de carrera" and carrera:
-        carrera_norm = normalizar_texto(carrera)
+    df_respuestas = df_respuestas.copy()
+    if not df_cat.empty:
+        df_respuestas["CARRERA_ID"] = df_respuestas[COL_SERVICIO].astype(str).apply(lambda x: _safe_mapear_carrera_id(x, df_cat))
+        df_respuestas["NOMBRE_OFICIAL"] = df_respuestas["CARRERA_ID"].apply(lambda cid: _nombre_oficial_from_id(cid, id_to_nombre))  # para mostrar consistente
+    else:
+        df_respuestas["CARRERA_ID"] = None
+        df_respuestas["NOMBRE_OFICIAL"] = df_respuestas[COL_SERVICIO].astype(str)
 
     # Hoja de cortes: convertir fechas (dayfirst=True)
     if not df_cortes.empty:
-        df_cortes["Fecha_inicio"] = pd.to_datetime(
-            df_cortes["Fecha_inicio"], errors="coerce", dayfirst=True
-        )
-        df_cortes["Fecha_fin"] = pd.to_datetime(
-            df_cortes["Fecha_fin"], errors="coerce", dayfirst=True
-        )
+        df_cortes["Fecha_inicio"] = pd.to_datetime(df_cortes["Fecha_inicio"], errors="coerce", dayfirst=True)
+        df_cortes["Fecha_fin"] = pd.to_datetime(df_cortes["Fecha_fin"], errors="coerce", dayfirst=True)
     else:
         df_cortes = pd.DataFrame(columns=["Corte", "Fecha_inicio", "Fecha_fin"])
 
     # Crear columna de Corte para cada observación
-    df_respuestas["Corte"] = df_respuestas[col_fecha].apply(
-        lambda f: asignar_corte(f, df_cortes)
-    )
+    df_respuestas["Corte"] = df_respuestas[col_fecha].apply(lambda f: asignar_corte(f, df_cortes))
 
     # --------------------------------------------------
     # SELECCIÓN DE COLUMNAS DE PUNTAJE
@@ -207,13 +244,8 @@ def render_observacion_clases(vista: str = "Dirección General", carrera: str | 
                 total += puntos
         return total
 
-    df_respuestas = df_respuestas.copy()
-    df_respuestas["Total_puntos_observación"] = df_respuestas.apply(
-        calcular_total_puntos_fila, axis=1
-    )
-    df_respuestas["Clasificación_observación"] = df_respuestas["Total_puntos_observación"].apply(
-        clasificar_por_puntos
-    )
+    df_respuestas["Total_puntos_observación"] = df_respuestas.apply(calcular_total_puntos_fila, axis=1)
+    df_respuestas["Clasificación_observación"] = df_respuestas["Total_puntos_observación"].apply(clasificar_por_puntos)
 
     # --------------------------------------------------
     # CUADRO DE INFORMACIÓN SOBRE PUNTAJE
@@ -271,21 +303,44 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
     if corte_seleccionado != "Todos los cortes":
         df_para_filtros = df_para_filtros[df_para_filtros["Corte"] == corte_seleccionado]
 
-    # Si es Director de carrera, restringimos ya por su servicio exacto
-    if carrera_norm:
-        df_para_filtros = df_para_filtros[df_para_filtros["Servicio_norm"] == carrera_norm]
+    # Vista Director: fijar por CARRERA_ID si hay catálogo; si no, cae a texto
+    carrera_id_fix = None
+    if vista == "Director de carrera" and carrera:
+        if not df_cat.empty:
+            carrera_id_fix = _safe_mapear_carrera_id(str(carrera), df_cat)
 
-    servicios_base = sorted(df_para_filtros[COL_SERVICIO].dropna().unique().tolist())
+    if carrera_id_fix:
+        df_para_filtros = df_para_filtros[df_para_filtros["CARRERA_ID"] == carrera_id_fix]
+    elif vista == "Director de carrera" and carrera:
+        # fallback (solo si no hubo catálogo o no mapeó)
+        df_para_filtros = df_para_filtros[df_para_filtros[COL_SERVICIO].astype(str).str.strip() == str(carrera).strip()]
 
-    # Selección de servicio
-    if carrera_norm:
+    # Selector de servicio (DG) con nombres oficiales si hay catálogo
+    if vista == "Director de carrera" and carrera:
         with col_f2:
             st.markdown(f"**Servicio:** {carrera} (vista Director de carrera)")
         servicio_seleccionado = "(director)"
+        servicio_id_sel = None
     else:
-        servicios_disponibles = ["Todos los servicios"] + servicios_base
-        with col_f2:
-            servicio_seleccionado = st.selectbox("Servicio", servicios_disponibles)
+        if not df_cat.empty:
+            # Mostramos oficiales; incluimos solo los que existan en datos filtrables
+            ids_presentes = sorted(df_para_filtros["CARRERA_ID"].dropna().astype(str).unique().tolist())
+            oficiales_presentes = [id_to_nombre.get(cid, cid) for cid in ids_presentes]
+            opciones_serv = ["Todos los servicios"] + sorted(set([o for o in oficiales_presentes if o]))
+            with col_f2:
+                servicio_sel_oficial = st.selectbox("Servicio", opciones_serv)
+            servicio_seleccionado = servicio_sel_oficial
+            servicio_id_sel = None
+            if servicio_sel_oficial != "Todos los servicios":
+                # obtener id por nombre seleccionado (invertimos contra el diccionario)
+                inv = {v: k for k, v in id_to_nombre.items() if v}
+                servicio_id_sel = inv.get(servicio_sel_oficial)
+        else:
+            servicios_base = sorted(df_para_filtros[COL_SERVICIO].dropna().unique().tolist())
+            servicios_disponibles = ["Todos los servicios"] + servicios_base
+            with col_f2:
+                servicio_seleccionado = st.selectbox("Servicio", servicios_disponibles)
+            servicio_id_sel = None
 
     # Filtro adicional opcional: tipo de observación (si existe la columna)
     tipo_obs_col = None
@@ -295,9 +350,7 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
         tipo_obs_col = "Tipo de observación "
 
     if tipo_obs_col:
-        tipos_disponibles = ["Todos los tipos"] + sorted(
-            df_para_filtros[tipo_obs_col].dropna().unique().tolist()
-        )
+        tipos_disponibles = ["Todos los tipos"] + sorted(df_para_filtros[tipo_obs_col].dropna().unique().tolist())
         with col_f3:
             tipo_seleccionado = st.selectbox("Tipo de observación", tipos_disponibles)
     else:
@@ -313,10 +366,15 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
         df_filtrado = df_filtrado[df_filtrado["Corte"] == corte_seleccionado]
 
     # Filtro por servicio
-    if carrera_norm:
-        df_filtrado = df_filtrado[df_filtrado["Servicio_norm"] == carrera_norm]
-    elif servicio_seleccionado != "Todos los servicios":
-        df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO] == servicio_seleccionado]
+    if carrera_id_fix:
+        df_filtrado = df_filtrado[df_filtrado["CARRERA_ID"] == carrera_id_fix]
+    elif vista == "Director de carrera" and carrera:
+        df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO].astype(str).str.strip() == str(carrera).strip()]
+    else:
+        if not df_cat.empty and servicio_id_sel and servicio_seleccionado != "Todos los servicios":
+            df_filtrado = df_filtrado[df_filtrado["CARRERA_ID"].astype(str) == str(servicio_id_sel)]
+        elif df_cat.empty and servicio_seleccionado != "Todos los servicios":
+            df_filtrado = df_filtrado[df_filtrado[COL_SERVICIO] == servicio_seleccionado]
 
     # Filtro por tipo de observación
     if tipo_seleccionado != "Todos los tipos" and tipo_obs_col:
@@ -377,10 +435,15 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
         df_trend = df_respuestas.copy()
 
         # Aplicar filtros de servicio
-        if carrera_norm:
-            df_trend = df_trend[df_trend["Servicio_norm"] == carrera_norm]
-        elif servicio_seleccionado != "Todos los servicios":
-            df_trend = df_trend[df_trend[COL_SERVICIO] == servicio_seleccionado]
+        if carrera_id_fix:
+            df_trend = df_trend[df_trend["CARRERA_ID"] == carrera_id_fix]
+        elif vista == "Director de carrera" and carrera:
+            df_trend = df_trend[df_trend[COL_SERVICIO].astype(str).str.strip() == str(carrera).strip()]
+        else:
+            if not df_cat.empty and servicio_id_sel and servicio_seleccionado != "Todos los servicios":
+                df_trend = df_trend[df_trend["CARRERA_ID"].astype(str) == str(servicio_id_sel)]
+            elif df_cat.empty and servicio_seleccionado != "Todos los servicios":
+                df_trend = df_trend[df_trend[COL_SERVICIO] == servicio_seleccionado]
 
         # Filtro por tipo de observación
         if tipo_seleccionado != "Todos los tipos" and tipo_obs_col:
@@ -425,24 +488,27 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
         st.subheader("Clasificación por servicio")
 
         if total_obs > 0:
+            # Si hay catálogo, agrupamos por NOMBRE_OFICIAL (más limpio)
+            group_col = "NOMBRE_OFICIAL" if not df_cat.empty else COL_SERVICIO
+
             df_graf = (
-                df_base.groupby([COL_SERVICIO, "Clasificación_observación"])
+                df_base.groupby([group_col, "Clasificación_observación"])
                 .size()
                 .reset_index(name="conteo")
             )
 
-            totales_serv = df_graf.groupby(COL_SERVICIO)["conteo"].transform("sum")
+            totales_serv = df_graf.groupby(group_col)["conteo"].transform("sum")
             df_graf["porcentaje"] = df_graf["conteo"] * 100 / totales_serv
 
             chart = (
                 alt.Chart(df_graf)
                 .mark_bar()
                 .encode(
-                    x=alt.X(f"{COL_SERVICIO}:N", title="Servicio"),
+                    x=alt.X(f"{group_col}:N", title="Servicio"),
                     y=alt.Y("porcentaje:Q", title="Porcentaje"),
                     color=alt.Color("Clasificación_observación:N", title="Clasificación"),
                     tooltip=[
-                        COL_SERVICIO,
+                        group_col,
                         "Clasificación_observación",
                         alt.Tooltip("porcentaje:Q", format=".1f", title="Porcentaje (%)"),
                         "conteo",
@@ -455,14 +521,17 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
 
         st.markdown("#### Resumen por servicio")
 
+        group_col = "NOMBRE_OFICIAL" if not df_cat.empty else COL_SERVICIO
+
         resumen_servicio = (
-            df_filtrado.groupby(COL_SERVICIO)
+            df_filtrado.groupby(group_col)
             .agg(
                 Observaciones=("Total_puntos_observación", "count"),
                 Docentes_observados=(COL_DOCENTE, "nunique"),
                 Total_puntos=("Total_puntos_observación", "sum"),
             )
             .reset_index()
+            .rename(columns={group_col: "Servicio"})
         )
 
         resumen_servicio["Promedio_puntos_por_obs"] = (
@@ -494,9 +563,7 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
             clasificar_por_puntos
         )
 
-        cat_tipo = pd.CategoricalDtype(
-            ["Consolidado", "En proceso", "No consolidado"], ordered=True
-        )
+        cat_tipo = pd.CategoricalDtype(["Consolidado", "En proceso", "No consolidado"], ordered=True)
         resumen_docente["Clasificación_docente"] = resumen_docente["Clasificación_docente"].astype(cat_tipo)
 
         resumen_docente = resumen_docente.sort_values(
@@ -534,24 +601,25 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
                 etiqueta_base = (
                     etiqueta_base
                     + " | "
-                    + df_doc[COL_SERVICIO].astype(str)
+                    + (df_doc["NOMBRE_OFICIAL"].fillna(df_doc[COL_SERVICIO]).astype(str) if not df_cat.empty else df_doc[COL_SERVICIO].astype(str))
                     + " | Grupo: "
                     + df_doc["Grupo"].astype(str)
                 )
             else:
-                etiqueta_base = etiqueta_base + " | " + df_doc[COL_SERVICIO].astype(str)
+                etiqueta_base = etiqueta_base + " | " + (df_doc["NOMBRE_OFICIAL"].fillna(df_doc[COL_SERVICIO]).astype(str) if not df_cat.empty else df_doc[COL_SERVICIO].astype(str))
 
             df_doc["Etiqueta_obs"] = etiqueta_base
 
             cols_hist = [
                 col_fecha,
-                COL_SERVICIO,
+                "NOMBRE_OFICIAL" if not df_cat.empty else COL_SERVICIO,
+                COL_SERVICIO if not df_cat.empty else None,  # opcional: mostrar el texto original si quieres
                 "Grupo",
                 "Total_puntos_observación",
                 "Clasificación_observación",
                 "Corte",
             ]
-            cols_hist = [c for c in cols_hist if c in df_doc.columns]
+            cols_hist = [c for c in cols_hist if c and c in df_doc.columns]
 
             st.markdown(f"**Observaciones de {docente_sel} en el filtro actual:**")
             st.dataframe(df_doc[cols_hist], use_container_width=True)
@@ -677,10 +745,10 @@ En el caso de los **docentes**, se usa el **promedio de puntos por observación*
             )
 
             st.markdown("**Fortalezas observadas:**")
-            st.write(fortalezas if fortalezas else "Sin registro.")
+            st.write(fortalezas if fortalezas else "—")
 
             st.markdown("**Áreas de oportunidad observadas:**")
-            st.write(areas_op if areas_op else "Sin registro.")
+            st.write(areas_op if areas_op else "—")
 
             st.markdown("**Recomendaciones generales para la mejora continua:**")
-            st.write(recom if recom else "Sin registro.")
+            st.write(recom if recom else "—")
