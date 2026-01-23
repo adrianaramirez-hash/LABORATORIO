@@ -216,6 +216,7 @@ UNIDAD_ID_LABEL = {
     "EJEC": "EJEC — Licenciaturas Ejecutivas",
 }
 
+
 def _normalize_servicio_asignado(x: str) -> str:
     """
     Si el servicio asignado corresponde a unidad compactada (EDN/ECDG/EJEC o alias),
@@ -260,7 +261,7 @@ def get_gspread_client():
 def get_cat_carreras_df():
     """
     Carga el catálogo maestro CAT_CARRERAS.
-    No detiene la app si falla (deja DF vacío).
+    No detiene la app si falla (deja DF vacío), porque primero estabilizamos baseline.
     """
     try:
         gc = get_gspread_client()
@@ -270,7 +271,7 @@ def get_cat_carreras_df():
 
 
 # ============================================================
-# Lectura de ACCESOS (cacheada)
+# Lectura de ACCESOS (cacheada, pero forzamos lectura fresca al login con .clear())
 # ============================================================
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
@@ -299,7 +300,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 
     values = ws.get_all_values()
     if not values or len(values) < 1:
-        return pd.DataFrame(columns=["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO", "MODULOS", "AV_TIPO", "AV_VALOR"]), sa_email
+        return pd.DataFrame(columns=["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO", "MODULOS"]), sa_email
 
     header_idx = _first_nonempty_row_index(values)
     header = [str(c).strip() for c in values[header_idx]]
@@ -318,7 +319,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     df = pd.DataFrame(norm_data, columns=header)
     df.columns = [str(c).strip().upper() for c in df.columns]
 
-    for col in ["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO", "MODULOS", "AV_TIPO", "AV_VALOR"]:
+    for col in ["EMAIL", "ROL", "SERVICIO_ASIGNADO", "ACTIVO", "MODULOS"]:
         if col not in df.columns:
             df[col] = ""
 
@@ -326,8 +327,6 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
     df["ROL"] = df["ROL"].astype(str).str.strip().str.upper()
     df["SERVICIO_ASIGNADO"] = df["SERVICIO_ASIGNADO"].astype(str).str.strip()
     df["MODULOS"] = df["MODULOS"].astype(str).str.strip()
-    df["AV_TIPO"] = df["AV_TIPO"].astype(str).str.strip().str.upper()
-    df["AV_VALOR"] = df["AV_VALOR"].astype(str).str.strip()
 
     activo_raw = df["ACTIVO"].astype(str).str.strip().str.upper()
     df["ACTIVO"] = activo_raw.isin(["TRUE", "1", "SI", "SÍ", "YES", "ACTIVO"])
@@ -341,7 +340,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     email_norm = _norm_email(email)
     if not email_norm:
-        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "av_tipo": "", "av_valor": "", "mensaje": "No fue posible obtener el correo del usuario autenticado."}
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "No fue posible obtener el correo del usuario autenticado."}
 
     fila = df_accesos[df_accesos["EMAIL"] == email_norm]
     if fila.empty:
@@ -350,14 +349,12 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
             "rol": None,
             "servicios": [],
             "modulos": set(),
-            "av_tipo": "",
-            "av_valor": "",
             "mensaje": "Tu correo autenticado no está habilitado en ACCESOS (o está inactivo).",
         }
 
     rol = str(fila.iloc[0]["ROL"]).strip().upper()
 
-    # 1) parse servicios (para selector general DC)
+    # 1) parse servicios
     servicios_raw = _parse_servicios_cell(fila.iloc[0].get("SERVICIO_ASIGNADO", ""))
 
     # 2) normaliza compactadas a IDs finales (EDN/ECDG/EJEC)
@@ -367,21 +364,17 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
         if s2:
             servicios.append(s2)
 
-    # dedupe conservando orden
+    # dedupe (conserva orden)
     seen = set()
     servicios = [x for x in servicios if not (x in seen or seen.add(x))]
 
     modulos = _parse_modulos_cell(fila.iloc[0].get("MODULOS", ""))
 
-    # AV_TIPO / AV_VALOR (para Aulas Virtuales)
-    av_tipo = str(fila.iloc[0].get("AV_TIPO", "") or "").strip().upper()
-    av_valor = str(fila.iloc[0].get("AV_VALOR", "") or "").strip()
-
     if rol not in ["DG", "DC"]:
-        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "av_tipo": "", "av_valor": "", "mensaje": "ROL inválido en ACCESOS. Usa DG o DC."}
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "ROL inválido en ACCESOS. Usa DG o DC."}
 
     if rol == "DC" and not servicios:
-        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "av_tipo": "", "av_valor": "", "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
 
     if not modulos:
         return {
@@ -389,28 +382,14 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
             "rol": None,
             "servicios": [],
             "modulos": set(),
-            "av_tipo": "",
-            "av_valor": "",
             "mensaje": "Tu usuario no tiene MODULOS asignados en ACCESOS. Coloca ALL o una lista (ej. observacion_clases,aulas_virtuales).",
         }
-
-    # Normalización defensiva de AV_TIPO
-    if av_tipo and av_tipo not in ["SERVICIO", "ESCUELA"]:
-        av_tipo = ""
-
-    # Para DG no usamos av_tipo/av_valor (puede ir vacío)
-    if rol == "DC":
-        # Si el usuario tiene acceso a aulas_virtuales y no trae AV_VALOR, lo dejamos vacío
-        # (el módulo hará fallback a 'carrera' si es necesario).
-        pass
 
     return {
         "ok": True,
         "rol": rol,
         "servicios": (servicios if rol == "DC" else []),
         "modulos": modulos,
-        "av_tipo": av_tipo,
-        "av_valor": av_valor,
         "mensaje": "OK",
     }
 
@@ -474,8 +453,6 @@ if "user_rol" not in st.session_state:
                     "user_modulos",
                     "user_allow_all",
                     "carrera_seleccionada_dc",
-                    "av_tipo",
-                    "av_valor",
                 ]:
                     st.session_state.pop(k, None)
                 st.rerun()
@@ -486,11 +463,6 @@ if "user_rol" not in st.session_state:
         st.session_state["user_servicios"] = res["servicios"]
         st.session_state["user_modulos"] = res["modulos"]
         st.session_state["user_allow_all"] = ("ALL" in res["modulos"])
-
-        # ✅ NUEVO: AV_TIPO/AV_VALOR a session_state para que Aulas Virtuales filtre correcto
-        st.session_state["av_tipo"] = res.get("av_tipo", "")
-        st.session_state["av_valor"] = res.get("av_valor", "")
-
         st.session_state.pop("carrera_seleccionada_dc", None)
 
     except Exception as e:
@@ -525,8 +497,6 @@ with c2:
             "user_modulos",
             "user_allow_all",
             "carrera_seleccionada_dc",
-            "av_tipo",
-            "av_valor",
         ]:
             st.session_state.pop(k, None)
         st.rerun()
@@ -706,10 +676,13 @@ try:
 
     elif seccion == "Aulas virtuales":
         try:
-            # ✅ Importante:
-            # - DG filtra dentro del módulo (nivel/escuela/servicio).
-            # - DC filtra con session_state['av_tipo'] y ['av_valor'] si existen.
-            aulas_virtuales.mostrar(vista=vista, carrera=carrera)
+            # ✅ Alternativa 2 (redirigir “duro” para DC)
+            if vista != "Dirección General":
+                carrera_forzada = "EDN"   # <<--- aquí cambias a ECDG / EJEC si quisieras
+                aulas_virtuales.mostrar(vista=vista, carrera=carrera_forzada)
+            else:
+                aulas_virtuales.mostrar(vista=vista, carrera=carrera)
+
         except Exception as e:
             st.error("Error al cargar Aulas virtuales.")
             if DEBUG:
