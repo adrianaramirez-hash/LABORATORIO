@@ -5,6 +5,8 @@ import altair as alt
 import gspread
 import re
 
+from catalogos import mapear_carrera_id
+
 SHEET_FORM = "AULAS_VIRTUALES_FORM"
 SHEET_CATALOGO = "CAT_SERVICIOS_ESTRUCTURA"
 
@@ -54,6 +56,45 @@ CATS_MEJORAS = {
 }
 
 
+# ============================================================
+# CATÁLOGO MAESTRO (desde session_state)
+# ============================================================
+def _get_catalogo_carreras_df() -> pd.DataFrame:
+    df_cat = st.session_state.get("df_cat_carreras")
+    if df_cat is None or getattr(df_cat, "empty", True):
+        return pd.DataFrame()
+    return df_cat
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _build_id_to_nombre_map(df_cat: pd.DataFrame) -> dict:
+    if df_cat is None or df_cat.empty:
+        return {}
+    d = {}
+    if "carrera_id" in df_cat.columns and "nombre_oficial" in df_cat.columns:
+        for _, r in df_cat[["carrera_id", "nombre_oficial"]].dropna().iterrows():
+            d[str(r["carrera_id"]).strip()] = str(r["nombre_oficial"]).strip()
+    return d
+
+
+def _safe_mapear_carrera_id(texto: str, df_cat: pd.DataFrame):
+    if not texto or df_cat is None or df_cat.empty:
+        return None
+    try:
+        return mapear_carrera_id(texto, df_cat)
+    except Exception:
+        return None
+
+
+def _nombre_oficial_from_id(carrera_id: str | None, id_to_nombre: dict) -> str:
+    if not carrera_id:
+        return ""
+    return id_to_nombre.get(str(carrera_id).strip(), "")
+
+
+# ============================================================
+# Helpers
+# ============================================================
 def _get_av_url() -> str:
     url = st.secrets.get("AV_URL", "").strip()
     if not url:
@@ -70,7 +111,7 @@ def _clean_service_name(x: str) -> str:
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     s = str(x).strip()
-    s = re.sub(r"\s+", " ", s)  # colapsa espacios dobles
+    s = re.sub(r"\s+", " ", s)
     return s
 
 
@@ -299,6 +340,9 @@ Columna:
         )
 
 
+# ============================================================
+# Render
+# ============================================================
 def mostrar(vista: str, carrera: str | None = None):
     st.subheader("Aulas virtuales")
 
@@ -332,9 +376,25 @@ def mostrar(vista: str, carrera: str | None = None):
         return
 
     # ---------------------------
-    # Normalización + join de catálogo
+    # Catálogo maestro carreras (CAT_CARRERAS) -> CARRERA_ID / NOMBRE_OFICIAL
     # ---------------------------
+    df_cat_carreras = _get_catalogo_carreras_df()
+    id_to_nombre = _build_id_to_nombre_map(df_cat_carreras) if not df_cat_carreras.empty else {}
+
     df = df.copy()
+    if not df_cat_carreras.empty:
+        df["CARRERA_ID"] = df["Indica el servicio"].astype(str).apply(lambda x: _safe_mapear_carrera_id(x, df_cat_carreras))
+        df["NOMBRE_OFICIAL"] = df["CARRERA_ID"].apply(lambda cid: _nombre_oficial_from_id(cid, id_to_nombre)).fillna("")
+        # Si no mapeó, conserva el texto original como fallback de visualización
+        df.loc[df["NOMBRE_OFICIAL"].astype(str).str.strip() == "", "NOMBRE_OFICIAL"] = df["Indica el servicio"].astype(str)
+    else:
+        df["CARRERA_ID"] = None
+        df["NOMBRE_OFICIAL"] = df["Indica el servicio"].astype(str)
+
+    # ---------------------------
+    # Normalización + join de catálogo interno (CAT_SERVICIOS_ESTRUCTURA)
+    # (se mantiene: escuela / nivel / tipo_unidad)
+    # ---------------------------
     cat = cat.copy()
 
     df["servicio_std"] = df["Indica el servicio"].apply(_clean_service_name)
@@ -351,63 +411,91 @@ def mostrar(vista: str, carrera: str | None = None):
     )
 
     # ---------------------------
-    # Periodo (anual): usar fecha solo como contexto
+    # Fecha
     # ---------------------------
     fecha_col = _pick_fecha_col(df)
     if fecha_col:
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
-    # Filtro: DG puede elegir; DC se fuerza a su carrera
+    # Filtros
     # ---------------------------
-    servicio_base = _clean_service_name(carrera or "")
-
+    # DC: se fuerza a su carrera -> idealmente por CARRERA_ID (si hay catálogo)
     if vista != "Dirección General":
-        # DC: no se permite "(Todos)" ni filtros internos por escuela
-        if not servicio_base:
+        if not (carrera or "").strip():
             st.error("Vista DC: no se recibió la carrera/servicio asignado.")
             st.stop()
 
-        servicio_sel = servicio_base
-        f = df[df["servicio_std"] == servicio_sel].copy()
-        unidad_txt = f"Servicio: {servicio_sel}"
+        if not df_cat_carreras.empty:
+            carrera_id_fix = _safe_mapear_carrera_id(str(carrera), df_cat_carreras)
+        else:
+            carrera_id_fix = None
+
+        if carrera_id_fix:
+            f = df[df["CARRERA_ID"] == carrera_id_fix].copy()
+            unidad_txt = f"Servicio: {id_to_nombre.get(carrera_id_fix, str(carrera).strip())}"
+        else:
+            # fallback a texto exacto si no hay catálogo o no mapeó
+            servicio_base = _clean_service_name(carrera)
+            f = df[df["servicio_std"] == servicio_base].copy()
+            unidad_txt = f"Servicio: {servicio_base}"
 
         if f.empty:
-            st.warning("No hay registros para el servicio asignado (revisa que el texto coincida con 'Indica el servicio').")
-            st.caption(f"Servicio recibido desde app.py: {servicio_base}")
+            st.warning("No hay registros para el servicio asignado.")
+            st.caption(f"Servicio recibido desde app.py: {str(carrera).strip()}")
+            if not df_cat_carreras.empty:
+                st.caption("Sugerencia: revisa que el texto/variante exista en CAT_CARRERAS (columna variantes).")
             st.stop()
 
     else:
-        # DG: selector interno con (Todos) y agrupación por escuela si aplica
+        # DG: selector por NOMBRE_OFICIAL + opción "Sin mapear"
         with st.container(border=True):
             st.markdown("**Filtro del apartado (Aulas Virtuales)**")
 
-            servicios_disponibles = (
-                cat["servicio_std"].dropna().astype(str).str.strip().unique().tolist()
-            )
-            servicios_disponibles = sorted(set([s for s in servicios_disponibles if s]))
+            if not df_cat_carreras.empty:
+                opciones_oficiales = sorted(set(df["NOMBRE_OFICIAL"].dropna().astype(str).str.strip().tolist()))
+                opciones_oficiales = [o for o in opciones_oficiales if o]
+                opciones = ["(Todos)", "(Sin mapear)"] + opciones_oficiales
 
-            opciones = ["(Todos)"] + servicios_disponibles
+                servicio_sel_oficial = st.selectbox(
+                    "Servicio a analizar (Aulas Virtuales)",
+                    options=opciones,
+                    index=0,
+                )
 
-            servicio_sel = st.selectbox(
-                "Servicio a analizar (Aulas Virtuales)",
-                options=opciones,
-                index=0,
-            )
+                if servicio_sel_oficial == "(Todos)":
+                    f = df.copy()
+                    unidad_txt = "Todos los servicios"
+                elif servicio_sel_oficial == "(Sin mapear)":
+                    f = df[df["CARRERA_ID"].isna()].copy()
+                    unidad_txt = "Registros sin mapeo (CARRERA_ID vacío)"
+                else:
+                    f = df[df["NOMBRE_OFICIAL"].astype(str).str.strip() == servicio_sel_oficial].copy()
+                    unidad_txt = f"Servicio: {servicio_sel_oficial}"
+            else:
+                servicios_disponibles = sorted(set(cat["servicio_std"].dropna().astype(str).str.strip().tolist()))
+                servicios_disponibles = [s for s in servicios_disponibles if s]
+                opciones = ["(Todos)"] + servicios_disponibles
 
-        if servicio_sel == "(Todos)":
-            f = df.copy()
-            unidad_txt = "Todos los servicios"
-        else:
-            f = df[df["servicio_std"] == servicio_sel].copy()
-            unidad_txt = f"Servicio: {servicio_sel}"
+                servicio_sel = st.selectbox(
+                    "Servicio a analizar (Aulas Virtuales)",
+                    options=opciones,
+                    index=0,
+                )
+
+                if servicio_sel == "(Todos)":
+                    f = df.copy()
+                    unidad_txt = "Todos los servicios"
+                else:
+                    f = df[df["servicio_std"] == servicio_sel].copy()
+                    unidad_txt = f"Servicio: {servicio_sel}"
 
         if f.empty:
             st.warning("No hay registros con el filtro seleccionado.")
             return
 
     # ---------------------------
-    # Encabezado ejecutivo (contexto)
+    # Encabezado ejecutivo
     # ---------------------------
     n = len(f)
     if fecha_col and f[fecha_col].notna().any():
@@ -440,7 +528,26 @@ def mostrar(vista: str, carrera: str | None = None):
         fx[col] = _as_num(fx[col])
 
     # ---------------------------
-    # Tabs (2)
+    # Cálculos base
+    # ---------------------------
+    alumnos_avg = _avg(fx[NUM_COLS["alumnos"]])
+    docente_avg = _avg(fx[NUM_COLS["docente"]])
+    alumnos_siempre = _pct_eq(fx[NUM_COLS["alumnos"]], 2)
+    docente_siempre = _pct_eq(fx[NUM_COLS["docente"]], 2)
+
+    def_avg = _avg(fx[NUM_COLS["definicion"]])
+    def_completa = _pct_eq(fx[NUM_COLS["definicion"]], 2)
+    def_no = _pct_eq(fx[NUM_COLS["definicion"]], 0)
+
+    bloques_avg = _avg(fx[NUM_COLS["bloques"]])
+    bloques_todas = _pct_eq(fx[NUM_COLS["bloques"]], 2)
+
+    freq_avg = _avg(fx[NUM_COLS["frecuencia"]])   # 0–3
+    util_avg = _avg(fx[NUM_COLS["utilidad"]])     # 0–3
+    alt_si = _pct_eq(fx[NUM_COLS["formato_alt"]], 1)
+
+    # ---------------------------
+    # Tabs
     # ---------------------------
     tab1, tab2 = st.tabs(["Resumen ejecutivo", "Diagnóstico por secciones"])
 
@@ -449,22 +556,6 @@ def mostrar(vista: str, carrera: str | None = None):
     # ============================================================
     with tab1:
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-
-        alumnos_avg = _avg(fx[NUM_COLS["alumnos"]])
-        docente_avg = _avg(fx[NUM_COLS["docente"]])
-        alumnos_siempre = _pct_eq(fx[NUM_COLS["alumnos"]], 2)
-        docente_siempre = _pct_eq(fx[NUM_COLS["docente"]], 2)
-
-        def_avg = _avg(fx[NUM_COLS["definicion"]])
-        def_completa = _pct_eq(fx[NUM_COLS["definicion"]], 2)
-        def_no = _pct_eq(fx[NUM_COLS["definicion"]], 0)
-
-        bloques_avg = _avg(fx[NUM_COLS["bloques"]])
-        bloques_todas = _pct_eq(fx[NUM_COLS["bloques"]], 2)
-
-        freq_avg = _avg(fx[NUM_COLS["frecuencia"]])   # 0–3
-        util_avg = _avg(fx[NUM_COLS["utilidad"]])     # 0–3
-
         c1.metric("Alumnos (prom 0–2)", f"{alumnos_avg:.2f}" if alumnos_avg is not None else "—")
         c2.metric("Docente (prom 0–2)", f"{docente_avg:.2f}" if docente_avg is not None else "—")
         c3.metric("% Siempre (alumnos)", f"{alumnos_siempre:.1f}%" if alumnos_siempre is not None else "—")
@@ -480,8 +571,6 @@ def mostrar(vista: str, carrera: str | None = None):
         c9.metric("% Bloques: todas semanas", f"{bloques_todas:.1f}%" if bloques_todas is not None else "—")
         c10.metric("Frecuencia (prom 0–3)", f"{freq_avg:.2f}" if freq_avg is not None else "—")
         c11.metric("Utilidad (prom 0–3)", f"{util_avg:.2f}" if util_avg is not None else "—")
-
-        alt_si = _pct_eq(fx[NUM_COLS["formato_alt"]], 1)
         c12.metric("% Quiere formato alternativo", f"{alt_si:.1f}%" if alt_si is not None else "—")
 
         st.divider()
@@ -577,7 +666,11 @@ def mostrar(vista: str, carrera: str | None = None):
                 top_b = _top_categories(f[TEXT_COLS["beneficios"]], CATS_BENEFICIOS, top_n=6)
                 _plot_cat_counts(top_b, "Beneficios")
                 if not top_b.empty:
-                    cat_sel_b = st.selectbox("Ver ejemplos (Beneficios)", ["(Ninguno)"] + top_b["Categoría"].tolist(), key="b_sel")
+                    cat_sel_b = st.selectbox(
+                        "Ver ejemplos (Beneficios)",
+                        ["(Ninguno)"] + top_b["Categoría"].tolist(),
+                        key="b_sel",
+                    )
                     if cat_sel_b != "(Ninguno)":
                         ejemplos = f[[TEXT_COLS["beneficios"]]].dropna().astype(str)
                         ejemplos = ejemplos[ejemplos[TEXT_COLS["beneficios"]].str.strip() != ""]
@@ -593,7 +686,11 @@ def mostrar(vista: str, carrera: str | None = None):
                 top_l = _top_categories(f[TEXT_COLS["limitaciones"]], CATS_LIMITACIONES, top_n=6)
                 _plot_cat_counts(top_l, "Limitaciones")
                 if not top_l.empty:
-                    cat_sel_l = st.selectbox("Ver ejemplos (Limitaciones)", ["(Ninguno)"] + top_l["Categoría"].tolist(), key="l_sel")
+                    cat_sel_l = st.selectbox(
+                        "Ver ejemplos (Limitaciones)",
+                        ["(Ninguno)"] + top_l["Categoría"].tolist(),
+                        key="l_sel",
+                    )
                     if cat_sel_l != "(Ninguno)":
                         ejemplos = f[[TEXT_COLS["limitaciones"]]].dropna().astype(str)
                         ejemplos = ejemplos[ejemplos[TEXT_COLS["limitaciones"]].str.strip() != ""]
@@ -609,7 +706,11 @@ def mostrar(vista: str, carrera: str | None = None):
                 top_m = _top_categories(f[TEXT_COLS["mejoras"]], CATS_MEJORAS, top_n=6)
                 _plot_cat_counts(top_m, "Mejoras")
                 if not top_m.empty:
-                    cat_sel_m = st.selectbox("Ver ejemplos (Mejoras)", ["(Ninguno)"] + top_m["Categoría"].tolist(), key="m_sel")
+                    cat_sel_m = st.selectbox(
+                        "Ver ejemplos (Mejoras)",
+                        ["(Ninguno)"] + top_m["Categoría"].tolist(),
+                        key="m_sel",
+                    )
                     if cat_sel_m != "(Ninguno)":
                         ejemplos = f[[TEXT_COLS["mejoras"]]].dropna().astype(str)
                         ejemplos = ejemplos[ejemplos[TEXT_COLS["mejoras"]].str.strip() != ""]
