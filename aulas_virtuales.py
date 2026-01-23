@@ -66,6 +66,7 @@ def _norm_sheet_title(x: str) -> str:
 
 
 def _clean_service_name(x: str) -> str:
+    """Normalización suave para nombres (sin cambiar semántica)."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     s = str(x).strip()
@@ -73,30 +74,14 @@ def _clean_service_name(x: str) -> str:
     return s
 
 
-def _norm_text(s: str) -> str:
-    if s is None or (isinstance(s, float) and pd.isna(s)):
-        return ""
-    s = str(s).strip().lower()
+def _norm_key(x: str) -> str:
+    """Clave robusta para joins/filtros."""
+    s = _clean_service_name(x).lower()
     s = re.sub(r"\s+", " ", s)
-    return s
-
-
-def _norm_key(s: str) -> str:
-    s = _norm_text(s)
-    s = re.sub(r"[^a-z0-9 ]+", "", s)
+    s = re.sub(r"[^a-z0-9áéíóúüñ ]+", "", s)
+    s = s.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u").replace("ü","u").replace("ñ","n")
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
-
-def _split_multi(x: str) -> list[str]:
-    """
-    Permite que 'carrera' o AV_VALOR venga con múltiples valores:
-      - separadores: coma, pipe, punto y coma
-    """
-    if not x:
-        return []
-    parts = re.split(r"[,\|;]", str(x))
-    return [p.strip() for p in parts if p.strip()]
 
 
 def _pick_fecha_col(df: pd.DataFrame) -> str | None:
@@ -149,7 +134,9 @@ def _load_from_gsheets_by_url(url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         rows = values[1:]
         return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
 
-    return ws_to_df(ws_form), ws_to_df(ws_cat)
+    df_form = ws_to_df(ws_form)
+    df_cat = ws_to_df(ws_cat)
+    return df_form, df_cat
 
 
 def _as_num(s: pd.Series) -> pd.Series:
@@ -177,10 +164,8 @@ def _dist_counts(series: pd.Series) -> pd.DataFrame:
     vc = s.value_counts().sort_index()
     out = vc.reset_index()
     out.columns = ["Nivel", "Conteo"]
-    try:
-        out["Nivel"] = out["Nivel"].astype(int).astype(str)
-    except Exception:
-        out["Nivel"] = out["Nivel"].astype(str)
+    # evita error si hay floats raros
+    out["Nivel"] = out["Nivel"].astype(int, errors="ignore").astype(str)
     return out
 
 
@@ -199,6 +184,12 @@ def _bar(df: pd.DataFrame, title: str):
         .properties(height=280, title=title)
     )
     st.altair_chart(chart, use_container_width=True)
+
+
+def _norm_text(s: str) -> str:
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    return str(s).strip().lower()
 
 
 def _classify_text(s: str, cats: dict) -> str:
@@ -251,9 +242,80 @@ def _metodologia_expander():
             """
 **Fuente de cálculo:** columnas numéricas generadas en la hoja `AULAS_VIRTUALES_FORM`.
 
-**Nota:** Los porcentajes se calculan únicamente con respuestas válidas (se excluyen celdas vacías o no numéricas).
+### 1) Uso del Aula Virtual (Alumnos / Docente) — escala 0–2
+- **Nunca = 0**
+- **A veces = 1**
+- **Siempre = 2**
+
+### 2) Definición del curso — escala 0–2
+- **No lo realicé = 0**
+- **Sí, pero incompletas = 1**
+- **Sí, todas las secciones = 2**
+
+### 3) Sesiones/Bloques agregados — escala 0–2
+- **No lo realicé = 0**
+- **Sí, pero de forma parcial = 1**
+- **Sí, todas las semanas = 2**
+
+### 4) Frecuencia de actualización — escala 0–3
+- **No actualicé = 0**
+- **Solo en algunas ocasiones = 1**
+- **Quincenalmente = 2**
+- **Cada semana = 3**
+
+### 5) Utilidad percibida — escala 0–3
+- **Nada útil = 0**
+- **Poco útil = 1**
+- **Útil = 2**
+- **Muy útil = 3**
+
+### 6) Secciones completadas — conteo 0–5
+- Se calcula como el **número de secciones seleccionadas**.
+- **“Ninguna” = 0**
+
+### 7) Formato alternativo — escala 0–1
+- **No = 0**
+- **Sí = 1**
             """
         )
+
+
+def _enrich_with_catalog(df: pd.DataFrame, cat: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Crea llaves y hace merge robusto con catálogo."""
+    df = df.copy()
+    cat = cat.copy()
+
+    # Validaciones mínimas
+    if "Indica el servicio" not in df.columns:
+        raise ValueError("En AULAS_VIRTUALES_FORM falta la columna exacta: 'Indica el servicio'")
+    if "servicio" not in cat.columns:
+        raise ValueError("En CAT_SERVICIOS_ESTRUCTURA falta la columna exacta: 'servicio'")
+
+    df["servicio_std"] = df["Indica el servicio"].apply(_clean_service_name)
+    cat["servicio_std"] = cat["servicio"].apply(_clean_service_name)
+
+    df["servicio_key"] = df["servicio_std"].apply(_norm_key)
+    cat["servicio_key"] = cat["servicio_std"].apply(_norm_key)
+
+    for col in ["escuela", "nivel", "tipo_unidad"]:
+        if col not in cat.columns:
+            cat[col] = pd.NA
+
+    # normaliza escuela/nivel para filtros estables
+    cat["escuela_std"] = cat["escuela"].apply(_clean_service_name)
+    cat["nivel_std"] = cat["nivel"].apply(_clean_service_name)
+
+    df = df.merge(
+        cat[["servicio_key", "servicio_std", "escuela_std", "nivel_std", "tipo_unidad"]],
+        on="servicio_key",
+        how="left",
+        suffixes=("", "_cat"),
+    )
+
+    # si el merge deja servicio_std vacío, conserva el del form
+    df["servicio_std"] = df["servicio_std"].fillna(df["Indica el servicio"].apply(_clean_service_name))
+
+    return df, cat
 
 
 def mostrar(vista: str, carrera: str | None = None):
@@ -278,126 +340,75 @@ def mostrar(vista: str, carrera: str | None = None):
         st.warning("La hoja CAT_SERVICIOS_ESTRUCTURA está vacía.")
         return
 
-    # ---------------------------
-    # Validaciones mínimas
-    # ---------------------------
-    if "Indica el servicio" not in df.columns:
-        st.error("En AULAS_VIRTUALES_FORM falta la columna exacta: 'Indica el servicio'")
-        st.dataframe(df.head(20), use_container_width=True)
-        return
-    if "servicio" not in cat.columns:
-        st.error("En CAT_SERVICIOS_ESTRUCTURA falta la columna exacta: 'servicio'")
-        st.dataframe(cat.head(20), use_container_width=True)
+    # Enriquecimiento
+    try:
+        df, cat = _enrich_with_catalog(df, cat)
+    except Exception as e:
+        st.error("No se pudo enriquecer con catálogo.")
+        st.exception(e)
         return
 
-    # ---------------------------
-    # Normalización + merge catálogo
-    # ---------------------------
-    df = df.copy()
-    cat = cat.copy()
-
-    df["servicio_std"] = df["Indica el servicio"].apply(_clean_service_name)
-    cat["servicio_std"] = cat["servicio"].apply(_clean_service_name)
-
-    for col in ["escuela", "nivel", "tipo_unidad"]:
-        if col not in cat.columns:
-            cat[col] = pd.NA
-
-    df = df.merge(
-        cat[["servicio_std", "escuela", "nivel", "tipo_unidad"]],
-        on="servicio_std",
-        how="left",
-    )
-
-    df["servicio_key"] = df["servicio_std"].apply(_norm_key)
-    df["escuela_key"] = df["escuela"].apply(_norm_key)
-    df["nivel_key"] = df["nivel"].apply(_norm_key)
-
-    # ---------------------------
-    # Periodo (solo contexto)
-    # ---------------------------
+    # Periodo
     fecha_col = _pick_fecha_col(df)
     if fecha_col:
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
-    # Resolver asignación AV (DC)
-    # ---------------------------
-    av_tipo = (st.session_state.get("av_tipo") or "").strip().upper()
-    av_valor = (st.session_state.get("av_valor") or "").strip()
-
-    # Prioridad: AV_VALOR (si existe) > carrera param (app.py)
-    raw_asignacion = av_valor or (carrera or "")
-    asignaciones = _split_multi(raw_asignacion)
-    asignaciones_keys = [_norm_key(x) for x in asignaciones]
-
-    # ---------------------------
     # Filtros
     # ---------------------------
     if vista != "Dirección General":
-        if not asignaciones_keys:
-            st.error("Vista DC: falta AV_VALOR (o carrera) para filtrar Aulas Virtuales.")
+        # DC: se mantiene (por ahora) por servicio exacto recibido
+        servicio_base = _clean_service_name(carrera or "")
+        if not servicio_base:
+            st.error("Vista DC: no se recibió la carrera/servicio asignado.")
             st.stop()
 
-        # Si AV_TIPO viene explícito, filtra por esa dimensión; si no, intenta escuela -> servicio.
-        if av_tipo == "ESCUELA":
-            f = df[df["escuela_key"].isin(asignaciones_keys)].copy()
-            unidad_txt = f"Escuela: {', '.join(asignaciones) if asignaciones else ''}"
-        elif av_tipo == "SERVICIO":
-            f = df[df["servicio_key"].isin(asignaciones_keys)].copy()
-            unidad_txt = f"Servicio: {', '.join(asignaciones) if asignaciones else ''}"
-        else:
-            # fallback inteligente: primero escuela, si no hay nada, servicio
-            f = df[df["escuela_key"].isin(asignaciones_keys)].copy()
-            if not f.empty:
-                unidad_txt = f"Escuela: {', '.join(asignaciones)}"
-            else:
-                f = df[df["servicio_key"].isin(asignaciones_keys)].copy()
-                unidad_txt = f"Servicio: {', '.join(asignaciones)}"
+        # Filtra por llave para tolerar diferencias de acentos/espacios
+        servicio_key = _norm_key(servicio_base)
+        f = df[df["servicio_key"] == servicio_key].copy()
+        unidad_txt = f"Servicio: {servicio_base}"
 
         if f.empty:
-            st.error("No hay registros para tu asignación (escuela/servicio) con el filtro actual.")
-            st.caption(f"AV_TIPO: {av_tipo or '(vacío)'} | AV_VALOR/carrera: '{raw_asignacion}'")
-            return
+            st.warning("No hay registros para el servicio asignado.")
+            st.caption(f"Servicio recibido desde app.py: {servicio_base}")
+            st.stop()
 
     else:
-        # DG: filtros internos por Nivel/Escuela/Servicio
+        # DG: filtros jerárquicos robustos (nivel -> escuela -> servicio)
         with st.container(border=True):
             st.markdown("**Filtro del apartado (Aulas Virtuales)**")
 
-            niveles = sorted([x for x in df["nivel"].dropna().astype(str).str.strip().unique().tolist() if x])
-            escuelas = sorted([x for x in df["escuela"].dropna().astype(str).str.strip().unique().tolist() if x])
+            # Opciones desde catálogo (fuente de verdad)
+            niveles = sorted([x for x in cat["nivel_std"].dropna().astype(str).unique().tolist() if x.strip()])
+            nivel_sel = st.selectbox("Nivel", ["(Todos)"] + niveles, index=0)
 
-            cA, cB, cC = st.columns([1.1, 1.4, 2.2])
-            with cA:
-                nivel_sel = st.selectbox("Nivel", ["(Todos)"] + niveles, index=0)
-            with cB:
-                escuela_sel = st.selectbox("Escuela", ["(Todas)"] + escuelas, index=0)
-
-            # Servicios dependientes (para que DG sí “filtre por carrera”)
-            tmp = df.copy()
+            cat_f = cat.copy()
             if nivel_sel != "(Todos)":
-                tmp = tmp[tmp["nivel"].astype(str).str.strip() == str(nivel_sel).strip()]
+                cat_f = cat_f[cat_f["nivel_std"].astype(str) == str(nivel_sel)]
+
+            escuelas = sorted([x for x in cat_f["escuela_std"].dropna().astype(str).unique().tolist() if x.strip()])
+            escuela_sel = st.selectbox("Escuela", ["(Todas)"] + escuelas, index=0)
+
             if escuela_sel != "(Todas)":
-                tmp = tmp[tmp["escuela"].astype(str).str.strip() == str(escuela_sel).strip()]
+                cat_f = cat_f[cat_f["escuela_std"].astype(str) == str(escuela_sel)]
 
-            servicios = sorted([x for x in tmp["servicio_std"].dropna().astype(str).str.strip().unique().tolist() if x])
-            with cC:
-                servicio_sel = st.selectbox("Servicio", ["(Todos)"] + servicios, index=0)
+            servicios = sorted([x for x in cat_f["servicio_std"].dropna().astype(str).unique().tolist() if x.strip()])
+            servicio_sel = st.selectbox("Servicio", ["(Todos)"] + servicios, index=0)
 
+        # Aplicar filtros a df usando llaves
         f = df.copy()
         unidad_parts = []
 
         if nivel_sel != "(Todos)":
-            f = f[f["nivel"].astype(str).str.strip() == str(nivel_sel).strip()]
+            f = f[f["nivel_std"].astype(str) == str(nivel_sel)]
             unidad_parts.append(f"Nivel: {nivel_sel}")
 
         if escuela_sel != "(Todas)":
-            f = f[f["escuela"].astype(str).str.strip() == str(escuela_sel).strip()]
+            f = f[f["escuela_std"].astype(str) == str(escuela_sel)]
             unidad_parts.append(f"Escuela: {escuela_sel}")
 
         if servicio_sel != "(Todos)":
-            f = f[f["servicio_std"].astype(str).str.strip() == str(servicio_sel).strip()]
+            f = f[f["servicio_key"] == _norm_key(servicio_sel)]
             unidad_parts.append(f"Servicio: {servicio_sel}")
 
         unidad_txt = " | ".join(unidad_parts) if unidad_parts else "Todos los servicios"
@@ -407,7 +418,7 @@ def mostrar(vista: str, carrera: str | None = None):
             return
 
     # ---------------------------
-    # Encabezado ejecutivo (contexto)
+    # Encabezado ejecutivo
     # ---------------------------
     n = len(f)
     if fecha_col and f[fecha_col].notna().any():
@@ -439,11 +450,11 @@ def mostrar(vista: str, carrera: str | None = None):
     for col in NUM_COLS.values():
         fx[col] = _as_num(fx[col])
 
+    # ---------------------------
+    # Tabs
+    # ---------------------------
     tab1, tab2 = st.tabs(["Resumen ejecutivo", "Diagnóstico por secciones"])
 
-    # ============================================================
-    # TAB 1
-    # ============================================================
     with tab1:
         c1, c2, c3, c4, c5, c6 = st.columns(6)
 
@@ -505,15 +516,13 @@ def mostrar(vista: str, carrera: str | None = None):
             st.divider()
             _bar(_dist_counts(fx[NUM_COLS["secciones_count"]]), "Secciones completadas (conteo)")
 
-    # ============================================================
-    # TAB 2
-    # ============================================================
     with tab2:
         st.markdown("### Sección I. Uso del Aula Virtual")
 
-        brecha = None
-        if docente_avg is not None and alumnos_avg is not None:
-            brecha = docente_avg - alumnos_avg
+        # Reusar métricas calculadas arriba
+        alumnos_avg = _avg(fx[NUM_COLS["alumnos"]])
+        docente_avg = _avg(fx[NUM_COLS["docente"]])
+        brecha = (docente_avg - alumnos_avg) if (docente_avg is not None and alumnos_avg is not None) else None
 
         d1, d2, d3 = st.columns(3)
         d1.metric("Prom. alumnos (0–2)", f"{alumnos_avg:.2f}" if alumnos_avg is not None else "—")
@@ -523,37 +532,44 @@ def mostrar(vista: str, carrera: str | None = None):
         st.divider()
         st.markdown("### Sección II. Llenado de la planeación")
 
+        def_completa = _pct_eq(fx[NUM_COLS["definicion"]], 2)
+        def_no = _pct_eq(fx[NUM_COLS["definicion"]], 0)
+        inc = _pct_eq(fx[NUM_COLS["definicion"]], 1)
+        sc_avg = _avg(fx[NUM_COLS["secciones_count"]])
+
         e1, e2, e3, e4 = st.columns(4)
         e1.metric("% Definición completa", f"{def_completa:.1f}%" if def_completa is not None else "—")
-        inc = _pct_eq(fx[NUM_COLS["definicion"]], 1)
         e2.metric("% Definición incompleta", f"{inc:.1f}%" if inc is not None else "—")
         e3.metric("% Definición NO", f"{def_no:.1f}%" if def_no is not None else "—")
-        sc_avg = _avg(fx[NUM_COLS["secciones_count"]])
         e4.metric("Prom. secciones completadas", f"{sc_avg:.2f}" if sc_avg is not None else "—")
 
         st.divider()
         st.markdown("### Sección II. Sesiones/Bloques y actualización")
 
+        bloques_todas = _pct_eq(fx[NUM_COLS["bloques"]], 2)
+        par = _pct_eq(fx[NUM_COLS["bloques"]], 1)
+        no_b = _pct_eq(fx[NUM_COLS["bloques"]], 0)
+        freq_avg = _avg(fx[NUM_COLS["frecuencia"]])
+
         f1, f2, f3, f4 = st.columns(4)
         f1.metric("% Bloques todas semanas", f"{bloques_todas:.1f}%" if bloques_todas is not None else "—")
-        par = _pct_eq(fx[NUM_COLS["bloques"]], 1)
         f2.metric("% Bloques parcial", f"{par:.1f}%" if par is not None else "—")
-        no_b = _pct_eq(fx[NUM_COLS["bloques"]], 0)
         f3.metric("% Bloques NO", f"{no_b:.1f}%" if no_b is not None else "—")
         f4.metric("Frecuencia prom (0–3)", f"{freq_avg:.2f}" if freq_avg is not None else "—")
 
         st.divider()
         st.markdown("### Sección III. Utilidad y sugerencias")
 
-        g1c, g2c, g3c, g4c = st.columns(4)
-        g1c.metric("Utilidad prom (0–3)", f"{util_avg:.2f}" if util_avg is not None else "—")
+        util_avg = _avg(fx[NUM_COLS["utilidad"]])
         muy = _pct_eq(fx[NUM_COLS["utilidad"]], 3)
-        g2c.metric("% Muy útil", f"{muy:.1f}%" if muy is not None else "—")
         poco = _pct_eq(fx[NUM_COLS["utilidad"]], 1)
         nada = _pct_eq(fx[NUM_COLS["utilidad"]], 0)
-        pn = None
-        if poco is not None or nada is not None:
-            pn = (poco or 0) + (nada or 0)
+        pn = ((poco or 0) + (nada or 0)) if (poco is not None or nada is not None) else None
+        alt_si = _pct_eq(fx[NUM_COLS["formato_alt"]], 1)
+
+        g1c, g2c, g3c, g4c = st.columns(4)
+        g1c.metric("Utilidad prom (0–3)", f"{util_avg:.2f}" if util_avg is not None else "—")
+        g2c.metric("% Muy útil", f"{muy:.1f}%" if muy is not None else "—")
         g3c.metric("% Poco/Nada útil", f"{pn:.1f}%" if pn is not None else "—")
         g4c.metric("% Quiere formato alternativo", f"{alt_si:.1f}%" if alt_si is not None else "—")
 
@@ -566,24 +582,23 @@ def mostrar(vista: str, carrera: str | None = None):
                 "No se encontraron algunas columnas de texto para clasificar. "
                 "Revisa encabezados en tu hoja:\n- " + "\n- ".join(missing_text_cols)
             )
-            return
+        else:
+            cB, cL, cM = st.columns(3)
 
-        cB, cL, cM = st.columns(3)
+            with cB:
+                st.markdown("**Beneficios (Top categorías)**")
+                top_b = _top_categories(f[TEXT_COLS["beneficios"]], CATS_BENEFICIOS, top_n=6)
+                _plot_cat_counts(top_b, "Beneficios")
 
-        with cB:
-            st.markdown("**Beneficios (Top categorías)**")
-            top_b = _top_categories(f[TEXT_COLS["beneficios"]], CATS_BENEFICIOS, top_n=6)
-            _plot_cat_counts(top_b, "Beneficios")
+            with cL:
+                st.markdown("**Limitaciones (Top categorías)**")
+                top_l = _top_categories(f[TEXT_COLS["limitaciones"]], CATS_LIMITACIONES, top_n=6)
+                _plot_cat_counts(top_l, "Limitaciones")
 
-        with cL:
-            st.markdown("**Limitaciones (Top categorías)**")
-            top_l = _top_categories(f[TEXT_COLS["limitaciones"]], CATS_LIMITACIONES, top_n=6)
-            _plot_cat_counts(top_l, "Limitaciones")
-
-        with cM:
-            st.markdown("**Mejoras (Top categorías)**")
-            top_m = _top_categories(f[TEXT_COLS["mejoras"]], CATS_MEJORAS, top_n=6)
-            _plot_cat_counts(top_m, "Mejoras")
+            with cM:
+                st.markdown("**Mejoras (Top categorías)**")
+                top_m = _top_categories(f[TEXT_COLS["mejoras"]], CATS_MEJORAS, top_n=6)
+                _plot_cat_counts(top_m, "Mejoras")
 
         st.divider()
         st.markdown("### Sección IV. Formato alternativo")
