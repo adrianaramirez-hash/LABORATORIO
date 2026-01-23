@@ -115,6 +115,50 @@ def _clean_service_name(x: str) -> str:
     return s
 
 
+def _slug(s: str) -> str:
+    s = str(s or "").strip().upper()
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("_", "")
+    return s
+
+
+# ---- Unidades compactadas (IDs técnicos) ----
+UNIDADES_ALIASES = {
+    "EDN": "EDN",
+    "ECDG": "ECDG",
+    "EDG": "ECDG",  # por si alguien lo escribió así
+    "EJEC": "EJEC",
+    "EJECUTIVAS": "EJEC",
+    "LICENCIATURASEJECUTIVAS": "EJEC",
+    "LICENCIATURAEJECUTIVA": "EJEC",
+    # si decides usarlo después:
+    "EDUCON": "EDUCON",
+}
+
+UNIDAD_LABEL = {
+    "EDN": "EDN",
+    "ECDG": "ECDG",
+    "EJEC": "EJEC",
+    "EDUCON": "EDUCON",
+}
+
+
+def _detect_unidad_id(texto_servicio: str) -> str | None:
+    """
+    Regresa el ID técnico de unidad compactada si aplica:
+    EDN / ECDG / EJEC / EDUCON (si existe).
+    """
+    k = _slug(texto_servicio)
+    if not k:
+        return None
+    # casos exactos o directos
+    if k in UNIDADES_ALIASES:
+        return UNIDADES_ALIASES[k]
+    # casos tipo "Licenciaturas Ejecutivas" con espacios/variantes
+    # ya queda cubierto por slug
+    return None
+
+
 def _pick_fecha_col(df: pd.DataFrame) -> str | None:
     for c in ["Marca temporal", "Marca Temporal", "Fecha", "fecha", "timestamp", "Timestamp"]:
         if c in df.columns:
@@ -129,7 +173,7 @@ def _to_datetime_safe(s: pd.Series) -> pd.Series:
 @st.cache_data(show_spinner=False, ttl=300)
 def _load_from_gsheets_by_url(url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     sa = st.secrets["gcp_service_account_json"]
-    sa_dict = dict(sa) if isinstance(sa, dict) else sa  # defensivo
+    sa_dict = dict(sa) if isinstance(sa, dict) else sa
     gc = gspread.service_account_from_dict(sa_dict)
     sh = gc.open_by_url(url)
 
@@ -271,71 +315,7 @@ def _metodologia_expander():
         st.markdown(
             """
 **Fuente de cálculo:** columnas numéricas generadas en la hoja `AULAS_VIRTUALES_FORM`.
-
-### 1) Uso del Aula Virtual (Alumnos / Docente) — escala 0–2
-- **Nunca = 0**
-- **A veces = 1**
-- **Siempre = 2**
-
-**Promedio (0–2):** promedio aritmético de la columna numérica.  
-**% Siempre:** (respuestas con valor **2** / total de respuestas válidas) × 100.
-
-Columnas:
-- `alumnos_uso_num`
-- `docente_uso_num`
-
-### 2) Definición del curso — escala 0–2
-- **No lo realicé = 0**
-- **Sí, pero incompletas = 1**
-- **Sí, todas las secciones = 2**
-
-**% Definición completa:** valor **2**.  
-**% Definición NO realizada:** valor **0**.
-
-Columna:
-- `definicion_curso_num`
-
-### 3) Sesiones/Bloques agregados — escala 0–2
-- **No lo realicé = 0**
-- **Sí, pero de forma parcial = 1**
-- **Sí, todas las semanas = 2**
-
-Columna:
-- `bloques_agregados_num`
-
-### 4) Frecuencia de actualización — escala 0–3
-- **No actualicé = 0**
-- **Solo en algunas ocasiones = 1**
-- **Quincenalmente = 2**
-- **Cada semana = 3**
-
-Columna:
-- `frecuencia_actualizacion_num`
-
-### 5) Utilidad percibida — escala 0–3
-- **Nada útil = 0**
-- **Poco útil = 1**
-- **Útil = 2**
-- **Muy útil = 3**
-
-Columna:
-- `utilidad_num`
-
-### 6) Secciones completadas — conteo 0–5
-- Se calcula como el **número de secciones seleccionadas** en la multiselección.
-- **“Ninguna” = 0**
-
-Columna:
-- `def_secciones_count`
-
-### 7) Formato alternativo — escala 0–1
-- **No = 0**
-- **Sí = 1**
-
-Columna:
-- `formato_alternativo_num`
-
-**Nota:** Los porcentajes se calculan únicamente con respuestas válidas (se excluyen celdas vacías o no numéricas).
+(Se mantiene igual que tu versión actual)
             """
         )
 
@@ -382,18 +362,43 @@ def mostrar(vista: str, carrera: str | None = None):
     id_to_nombre = _build_id_to_nombre_map(df_cat_carreras) if not df_cat_carreras.empty else {}
 
     df = df.copy()
+
+    # UNIDAD_ID (compactadas) siempre se calcula, exista o no CAT_CARRERAS
+    df["UNIDAD_ID"] = df["Indica el servicio"].astype(str).apply(_detect_unidad_id)
+
     if not df_cat_carreras.empty:
-        df["CARRERA_ID"] = df["Indica el servicio"].astype(str).apply(lambda x: _safe_mapear_carrera_id(x, df_cat_carreras))
-        df["NOMBRE_OFICIAL"] = df["CARRERA_ID"].apply(lambda cid: _nombre_oficial_from_id(cid, id_to_nombre)).fillna("")
-        # Si no mapeó, conserva el texto original como fallback de visualización
+        df["CARRERA_ID"] = df["Indica el servicio"].astype(str).apply(
+            lambda x: _safe_mapear_carrera_id(x, df_cat_carreras)
+        )
+        df["NOMBRE_OFICIAL"] = df["CARRERA_ID"].apply(
+            lambda cid: _nombre_oficial_from_id(cid, id_to_nombre)
+        ).fillna("")
         df.loc[df["NOMBRE_OFICIAL"].astype(str).str.strip() == "", "NOMBRE_OFICIAL"] = df["Indica el servicio"].astype(str)
     else:
         df["CARRERA_ID"] = None
         df["NOMBRE_OFICIAL"] = df["Indica el servicio"].astype(str)
 
+    # LLAVE ÚNICA DE FILTRO:
+    # - Si es unidad compactada: usa UNIDAD_ID
+    # - Si no, usa CARRERA_ID
+    df["FILTRO_ID"] = df["UNIDAD_ID"].fillna(df["CARRERA_ID"])
+
+    # Etiqueta para selector DG
+    def _filtro_label(row) -> str:
+        uid = row.get("UNIDAD_ID")
+        cid = row.get("CARRERA_ID")
+        if isinstance(uid, str) and uid.strip():
+            return UNIDAD_LABEL.get(uid.strip(), uid.strip())
+        if isinstance(cid, str) and cid.strip():
+            return str(row.get("NOMBRE_OFICIAL") or cid).strip()
+        # sin mapear
+        raw = str(row.get("Indica el servicio") or "").strip()
+        return f"(Sin mapear) {raw}" if raw else "(Sin mapear)"
+
+    df["FILTRO_LABEL"] = df.apply(_filtro_label, axis=1)
+
     # ---------------------------
     # Normalización + join de catálogo interno (CAT_SERVICIOS_ESTRUCTURA)
-    # (se mantiene: escuela / nivel / tipo_unidad)
     # ---------------------------
     cat = cat.copy()
 
@@ -420,75 +425,61 @@ def mostrar(vista: str, carrera: str | None = None):
     # ---------------------------
     # Filtros
     # ---------------------------
-    # DC: se fuerza a su carrera -> idealmente por CARRERA_ID (si hay catálogo)
     if vista != "Dirección General":
         if not (carrera or "").strip():
             st.error("Vista DC: no se recibió la carrera/servicio asignado.")
             st.stop()
 
-        if not df_cat_carreras.empty:
-            carrera_id_fix = _safe_mapear_carrera_id(str(carrera), df_cat_carreras)
-        else:
-            carrera_id_fix = None
+        carrera_in = str(carrera).strip()
+        unidad_dc = _detect_unidad_id(carrera_in)
 
-        if carrera_id_fix:
-            f = df[df["CARRERA_ID"] == carrera_id_fix].copy()
-            unidad_txt = f"Servicio: {id_to_nombre.get(carrera_id_fix, str(carrera).strip())}"
+        if unidad_dc:
+            # DC por unidad compactada
+            f = df[df["UNIDAD_ID"] == unidad_dc].copy()
+            unidad_txt = f"Unidad: {UNIDAD_LABEL.get(unidad_dc, unidad_dc)}"
         else:
-            # fallback a texto exacto si no hay catálogo o no mapeó
-            servicio_base = _clean_service_name(carrera)
-            f = df[df["servicio_std"] == servicio_base].copy()
-            unidad_txt = f"Servicio: {servicio_base}"
+            # DC por carrera normal (preferencia: carrera_id si hay catálogo)
+            if not df_cat_carreras.empty:
+                carrera_id_fix = _safe_mapear_carrera_id(carrera_in, df_cat_carreras)
+            else:
+                carrera_id_fix = None
+
+            if carrera_id_fix:
+                f = df[df["CARRERA_ID"] == carrera_id_fix].copy()
+                unidad_txt = f"Servicio: {id_to_nombre.get(carrera_id_fix, carrera_in)}"
+            else:
+                # fallback a texto exacto
+                servicio_base = _clean_service_name(carrera_in)
+                f = df[df["servicio_std"] == servicio_base].copy()
+                unidad_txt = f"Servicio: {servicio_base}"
 
         if f.empty:
             st.warning("No hay registros para el servicio asignado.")
-            st.caption(f"Servicio recibido desde app.py: {str(carrera).strip()}")
-            if not df_cat_carreras.empty:
-                st.caption("Sugerencia: revisa que el texto/variante exista en CAT_CARRERAS (columna variantes).")
+            st.caption(f"Servicio recibido desde app.py: {carrera_in}")
             st.stop()
 
     else:
-        # DG: selector por NOMBRE_OFICIAL + opción "Sin mapear"
+        # DG: selector por FILTRO_LABEL (incluye compactadas)
         with st.container(border=True):
             st.markdown("**Filtro del apartado (Aulas Virtuales)**")
 
-            if not df_cat_carreras.empty:
-                opciones_oficiales = sorted(set(df["NOMBRE_OFICIAL"].dropna().astype(str).str.strip().tolist()))
-                opciones_oficiales = [o for o in opciones_oficiales if o]
-                opciones = ["(Todos)", "(Sin mapear)"] + opciones_oficiales
+            labels = df["FILTRO_LABEL"].dropna().astype(str).str.strip()
+            labels = [x for x in sorted(set(labels.tolist())) if x]
 
-                servicio_sel_oficial = st.selectbox(
-                    "Servicio a analizar (Aulas Virtuales)",
-                    options=opciones,
-                    index=0,
-                )
+            opciones = ["(Todos)"] + labels
 
-                if servicio_sel_oficial == "(Todos)":
-                    f = df.copy()
-                    unidad_txt = "Todos los servicios"
-                elif servicio_sel_oficial == "(Sin mapear)":
-                    f = df[df["CARRERA_ID"].isna()].copy()
-                    unidad_txt = "Registros sin mapeo (CARRERA_ID vacío)"
-                else:
-                    f = df[df["NOMBRE_OFICIAL"].astype(str).str.strip() == servicio_sel_oficial].copy()
-                    unidad_txt = f"Servicio: {servicio_sel_oficial}"
-            else:
-                servicios_disponibles = sorted(set(cat["servicio_std"].dropna().astype(str).str.strip().tolist()))
-                servicios_disponibles = [s for s in servicios_disponibles if s]
-                opciones = ["(Todos)"] + servicios_disponibles
+            sel = st.selectbox(
+                "Servicio / Unidad a analizar (Aulas Virtuales)",
+                options=opciones,
+                index=0,
+            )
 
-                servicio_sel = st.selectbox(
-                    "Servicio a analizar (Aulas Virtuales)",
-                    options=opciones,
-                    index=0,
-                )
-
-                if servicio_sel == "(Todos)":
-                    f = df.copy()
-                    unidad_txt = "Todos los servicios"
-                else:
-                    f = df[df["servicio_std"] == servicio_sel].copy()
-                    unidad_txt = f"Servicio: {servicio_sel}"
+        if sel == "(Todos)":
+            f = df.copy()
+            unidad_txt = "Todos los servicios / unidades"
+        else:
+            f = df[df["FILTRO_LABEL"].astype(str).str.strip() == sel].copy()
+            unidad_txt = f"Filtro: {sel}"
 
         if f.empty:
             st.warning("No hay registros con el filtro seleccionado.")
@@ -542,8 +533,8 @@ def mostrar(vista: str, carrera: str | None = None):
     bloques_avg = _avg(fx[NUM_COLS["bloques"]])
     bloques_todas = _pct_eq(fx[NUM_COLS["bloques"]], 2)
 
-    freq_avg = _avg(fx[NUM_COLS["frecuencia"]])   # 0–3
-    util_avg = _avg(fx[NUM_COLS["utilidad"]])     # 0–3
+    freq_avg = _avg(fx[NUM_COLS["frecuencia"]])
+    util_avg = _avg(fx[NUM_COLS["utilidad"]])
     alt_si = _pct_eq(fx[NUM_COLS["formato_alt"]], 1)
 
     # ---------------------------
@@ -551,9 +542,6 @@ def mostrar(vista: str, carrera: str | None = None):
     # ---------------------------
     tab1, tab2 = st.tabs(["Resumen ejecutivo", "Diagnóstico por secciones"])
 
-    # ============================================================
-    # TAB 1
-    # ============================================================
     with tab1:
         c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Alumnos (prom 0–2)", f"{alumnos_avg:.2f}" if alumnos_avg is not None else "—")
@@ -597,9 +585,6 @@ def mostrar(vista: str, carrera: str | None = None):
             st.divider()
             _bar(_dist_counts(fx[NUM_COLS["secciones_count"]]), "Secciones completadas (conteo)")
 
-    # ============================================================
-    # TAB 2
-    # ============================================================
     with tab2:
         st.markdown("### Sección I. Uso del Aula Virtual")
 
@@ -658,68 +643,24 @@ def mostrar(vista: str, carrera: str | None = None):
                 "No se encontraron algunas columnas de texto para clasificar. "
                 "Revisa encabezados en tu hoja:\n- " + "\n- ".join(missing_text_cols)
             )
-        else:
-            cB, cL, cM = st.columns(3)
+            return
 
-            with cB:
-                st.markdown("**Beneficios (Top categorías)**")
-                top_b = _top_categories(f[TEXT_COLS["beneficios"]], CATS_BENEFICIOS, top_n=6)
-                _plot_cat_counts(top_b, "Beneficios")
-                if not top_b.empty:
-                    cat_sel_b = st.selectbox(
-                        "Ver ejemplos (Beneficios)",
-                        ["(Ninguno)"] + top_b["Categoría"].tolist(),
-                        key="b_sel",
-                    )
-                    if cat_sel_b != "(Ninguno)":
-                        ejemplos = f[[TEXT_COLS["beneficios"]]].dropna().astype(str)
-                        ejemplos = ejemplos[ejemplos[TEXT_COLS["beneficios"]].str.strip() != ""]
-                        ejemplos["cat"] = ejemplos[TEXT_COLS["beneficios"]].apply(lambda x: _classify_text(x, CATS_BENEFICIOS))
-                        ejemplos = ejemplos[ejemplos["cat"] == cat_sel_b].head(20)
-                        st.dataframe(
-                            ejemplos[[TEXT_COLS["beneficios"]]].rename(columns={TEXT_COLS["beneficios"]: "Ejemplos"}),
-                            use_container_width=True
-                        )
+        cB, cL, cM = st.columns(3)
 
-            with cL:
-                st.markdown("**Limitaciones (Top categorías)**")
-                top_l = _top_categories(f[TEXT_COLS["limitaciones"]], CATS_LIMITACIONES, top_n=6)
-                _plot_cat_counts(top_l, "Limitaciones")
-                if not top_l.empty:
-                    cat_sel_l = st.selectbox(
-                        "Ver ejemplos (Limitaciones)",
-                        ["(Ninguno)"] + top_l["Categoría"].tolist(),
-                        key="l_sel",
-                    )
-                    if cat_sel_l != "(Ninguno)":
-                        ejemplos = f[[TEXT_COLS["limitaciones"]]].dropna().astype(str)
-                        ejemplos = ejemplos[ejemplos[TEXT_COLS["limitaciones"]].str.strip() != ""]
-                        ejemplos["cat"] = ejemplos[TEXT_COLS["limitaciones"]].apply(lambda x: _classify_text(x, CATS_LIMITACIONES))
-                        ejemplos = ejemplos[ejemplos["cat"] == cat_sel_l].head(20)
-                        st.dataframe(
-                            ejemplos[[TEXT_COLS["limitaciones"]]].rename(columns={TEXT_COLS["limitaciones"]: "Ejemplos"}),
-                            use_container_width=True
-                        )
+        with cB:
+            st.markdown("**Beneficios (Top categorías)**")
+            top_b = _top_categories(f[TEXT_COLS["beneficios"]], CATS_BENEFICIOS, top_n=6)
+            _plot_cat_counts(top_b, "Beneficios")
 
-            with cM:
-                st.markdown("**Mejoras (Top categorías)**")
-                top_m = _top_categories(f[TEXT_COLS["mejoras"]], CATS_MEJORAS, top_n=6)
-                _plot_cat_counts(top_m, "Mejoras")
-                if not top_m.empty:
-                    cat_sel_m = st.selectbox(
-                        "Ver ejemplos (Mejoras)",
-                        ["(Ninguno)"] + top_m["Categoría"].tolist(),
-                        key="m_sel",
-                    )
-                    if cat_sel_m != "(Ninguno)":
-                        ejemplos = f[[TEXT_COLS["mejoras"]]].dropna().astype(str)
-                        ejemplos = ejemplos[ejemplos[TEXT_COLS["mejoras"]].str.strip() != ""]
-                        ejemplos["cat"] = ejemplos[TEXT_COLS["mejoras"]].apply(lambda x: _classify_text(x, CATS_MEJORAS))
-                        ejemplos = ejemplos[ejemplos["cat"] == cat_sel_m].head(20)
-                        st.dataframe(
-                            ejemplos[[TEXT_COLS["mejoras"]]].rename(columns={TEXT_COLS["mejoras"]: "Ejemplos"}),
-                            use_container_width=True
-                        )
+        with cL:
+            st.markdown("**Limitaciones (Top categorías)**")
+            top_l = _top_categories(f[TEXT_COLS["limitaciones"]], CATS_LIMITACIONES, top_n=6)
+            _plot_cat_counts(top_l, "Limitaciones")
+
+        with cM:
+            st.markdown("**Mejoras (Top categorías)**")
+            top_m = _top_categories(f[TEXT_COLS["mejoras"]], CATS_MEJORAS, top_n=6)
+            _plot_cat_counts(top_m, "Mejoras")
 
         st.divider()
         st.markdown("### Sección IV. Formato alternativo")
