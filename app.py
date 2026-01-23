@@ -190,6 +190,60 @@ def _show_traceback_expander(title: str = "Ver detalle técnico (diagnóstico)")
 
 
 # ============================================================
+# Normalización de UNIDADES compactadas (DC / ACCESOS)
+# ============================================================
+def _slug(s: str) -> str:
+    s = str(s or "").strip().upper()
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("_", "")
+    return s
+
+
+# IDs finales acordados
+UNIDAD_ID_ALIASES = {
+    "EDN": "EDN",
+    "ECDG": "ECDG",
+    "EDG": "ECDG",  # por si alguien lo escribe así
+    "EJEC": "EJEC",
+    "EJECUTIVAS": "EJEC",
+    "LICENCIATURASEJECUTIVAS": "EJEC",
+    "LICENCIATURAEJECUTIVA": "EJEC",
+}
+
+UNIDAD_ID_LABEL = {
+    "EDN": "EDN — Mercadotecnia / Finanzas / Contaduría / Administración de empresas",
+    "ECDG": "ECDG — Diseño Gráfico / Comunicación Multimedia / Cine y TV Digital",
+    "EJEC": "EJEC — Licenciaturas Ejecutivas",
+}
+
+def _normalize_servicio_asignado(x: str) -> str:
+    """
+    Si el servicio asignado corresponde a unidad compactada (EDN/ECDG/EJEC o alias),
+    regresa el ID final. Si no, regresa el texto original (trim).
+    """
+    raw = str(x or "").strip()
+    if not raw:
+        return ""
+    k = _slug(raw)
+    if k in UNIDAD_ID_ALIASES:
+        return UNIDAD_ID_ALIASES[k]
+    return raw
+
+
+def _display_servicio(x: str) -> str:
+    """
+    Para selectores (DC): si es unidad compactada, muestra etiqueta ejecutiva.
+    Si no, muestra el nombre tal cual.
+    """
+    v = str(x or "").strip()
+    if not v:
+        return ""
+    if v in UNIDAD_ID_LABEL:
+        return UNIDAD_ID_LABEL[v]
+    return v
+
+
+# ============================================================
 # Cliente gspread global (reutilizable)
 # ============================================================
 @st.cache_resource(show_spinner=False)
@@ -298,7 +352,21 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
         }
 
     rol = str(fila.iloc[0]["ROL"]).strip().upper()
-    servicios = _parse_servicios_cell(fila.iloc[0].get("SERVICIO_ASIGNADO", ""))
+
+    # 1) parse servicios
+    servicios_raw = _parse_servicios_cell(fila.iloc[0].get("SERVICIO_ASIGNADO", ""))
+
+    # 2) normaliza compactadas a IDs finales (EDN/ECDG/EJEC)
+    servicios = []
+    for s in servicios_raw:
+        s2 = _normalize_servicio_asignado(s)
+        if s2:
+            servicios.append(s2)
+
+    # (opcional) deduplicar conservando orden
+    seen = set()
+    servicios = [x for x in servicios if not (x in seen or seen.add(x))]
+
     modulos = _parse_modulos_cell(fila.iloc[0].get("MODULOS", ""))
 
     if rol not in ["DG", "DC"]:
@@ -464,16 +532,31 @@ else:
     if isinstance(SERVICIOS_DC, str):
         SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
 
+    # Normalización defensiva de espacios invisibles + alias a IDs finales
+    SERVICIOS_DC = [_normalize_servicio_asignado(s) for s in SERVICIOS_DC]
+    SERVICIOS_DC = [s for s in SERVICIOS_DC if s]
+
+    # dedupe
+    seen = set()
+    SERVICIOS_DC = [x for x in SERVICIOS_DC if not (x in seen or seen.add(x))]
+
     if len(SERVICIOS_DC) == 1:
         carrera = SERVICIOS_DC[0]
-        st.info(f"Acceso limitado a: **{carrera}**")
+        st.info(f"Acceso limitado a: **{_display_servicio(carrera)}**")
     else:
         default_idx = 0
         prev = st.session_state.get("carrera_seleccionada_dc")
+        if prev:
+            prev = _normalize_servicio_asignado(prev)
         if prev and prev in SERVICIOS_DC:
             default_idx = SERVICIOS_DC.index(prev)
 
-        carrera = st.selectbox("Selecciona el servicio/carrera:", SERVICIOS_DC, index=default_idx)
+        carrera = st.selectbox(
+            "Selecciona el servicio/carrera:",
+            SERVICIOS_DC,
+            index=default_idx,
+            format_func=_display_servicio,  # muestra bonito, pero el valor real es el ID/texto
+        )
         st.session_state["carrera_seleccionada_dc"] = carrera
         st.caption("Acceso limitado a tus servicios asignados.")
 
@@ -598,6 +681,7 @@ try:
 
     elif seccion == "Aulas virtuales":
         try:
+            # carrera puede ser carrera normal (texto) o unidad compactada (EDN/ECDG/EJEC)
             aulas_virtuales.mostrar(vista=vista, carrera=carrera)
         except Exception as e:
             st.error("Error al cargar Aulas virtuales.")
