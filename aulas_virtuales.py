@@ -325,6 +325,20 @@ def _metodologia_expander():
 # ============================================================
 def mostrar(vista: str, carrera: str | None = None):
     st.subheader("Aulas virtuales")
+# ===== DIAGNÓSTICO DURO DE CONTEXTO =====
+st.error("DIAGNÓSTICO ACTIVO – AULAS VIRTUALES")
+
+st.write("Vista recibida:", vista)
+st.write("Carrera recibida desde app.py:", carrera)
+
+st.write("Session df_cat_carreras existe:",
+         "df_cat_carreras" in st.session_state)
+
+if "df_cat_carreras" in st.session_state:
+    st.write("CAT_CARRERAS filas:",
+             len(st.session_state["df_cat_carreras"]))
+else:
+    st.write("CAT_CARRERAS NO cargado en session_state")
 
     # ---------------------------
     # Carga
