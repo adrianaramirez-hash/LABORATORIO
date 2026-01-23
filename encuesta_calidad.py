@@ -4,6 +4,8 @@ import streamlit as st
 import gspread
 import textwrap
 
+from catalogos import mapear_carrera_id
+
 # ============================================================
 # Etiquetas de secciones (fallback si Mapa_Preguntas no trae section_name)
 # ============================================================
@@ -76,6 +78,7 @@ def _pick_fecha_col(df: pd.DataFrame) -> str | None:
 
 def _ensure_prepa_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    # Para PREPA, forzamos una “carrera” fija
     if "Servicio" not in out.columns:
         out["Servicio"] = "Preparatoria"
     if "Carrera_Catalogo" not in out.columns:
@@ -104,23 +107,26 @@ def _resolver_modalidad_auto(vista: str, carrera: str | None) -> str:
     c = (carrera or "").strip().lower()
     if c == "preparatoria":
         return "Preparatoria"
-    if c.startswith("licenciatura ejecutiva:") or c.startswith("lic. ejecutiva:"):
-        return "Escolarizado / Ejecutivas"
+    # por ahora: ejecutivas viven dentro de escolarizado/ejecutivas
     return "Escolarizado / Ejecutivas"
 
 
 def _best_carrera_col(df: pd.DataFrame) -> str | None:
     """
-    Para Dirección General: elegir una sola columna para filtrar Carrera/Servicio,
-    sin duplicar filtros.
+    Elige la mejor columna disponible para extraer la “carrera” original.
+    OJO: aquí solo identificamos el ORIGEN; el filtro final debe ser por CARRERA_ID.
     """
     candidates = [
         "Carrera_Catalogo",
         "Servicio",
-        "Selecciona el programa académico que estudias",  # Virtual típico
-        "Servicio de procedencia",  # Escolar típico (si quedó)
+        "Selecciona el programa académico que estudias",
+        "Servicio de procedencia",
         "Programa",
         "Carrera",
+        "CARRERA",
+        "SERVICIO",
+        "AREA",
+        "ÁREA",
     ]
     for c in candidates:
         if c in df.columns:
@@ -146,6 +152,52 @@ def _auto_classify_numcols(df: pd.DataFrame, num_cols: list[str]) -> tuple[list[
     likert_cols = [c for c in num_cols if pd.notna(maxs.get(c)) and float(maxs.get(c)) > 1.0]
     yesno_cols = [c for c in num_cols if c not in likert_cols]
     return likert_cols, yesno_cols
+
+
+# ============================================================
+# CAT_CARRERAS (desde session_state)
+# ============================================================
+def _get_catalogo_carreras_df() -> pd.DataFrame:
+    df_cat = st.session_state.get("df_cat_carreras")
+    if df_cat is None or getattr(df_cat, "empty", True):
+        return pd.DataFrame()
+    return df_cat
+
+
+def _add_carrera_id(df: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
+    """
+    Agrega columna CARRERA_ID al dataframe usando CAT_CARRERAS.
+    Devuelve: (df_con_carrera_id, col_origen_carrera)
+    """
+    df_cat = _get_catalogo_carreras_df()
+    if df.empty:
+        return df, None
+
+    col_origen = _best_carrera_col(df)
+
+    # Si no hay columna origen, devolvemos sin bloquear
+    if not col_origen:
+        if "CARRERA_ID" not in df.columns:
+            df["CARRERA_ID"] = None
+        return df, None
+
+    # Si no hay catálogo, dejamos CARRERA_ID vacío
+    if df_cat.empty:
+        df["CARRERA_ID"] = None
+        return df, col_origen
+
+    # Mapeo por fila
+    df["CARRERA_ID"] = df[col_origen].astype(str).apply(lambda x: mapear_carrera_id(x, df_cat))
+    return df, col_origen
+
+
+def _nombre_oficial_por_id(carrera_id: str, df_cat: pd.DataFrame) -> str:
+    if not carrera_id or df_cat.empty:
+        return str(carrera_id or "").strip()
+    m = df_cat[df_cat["carrera_id"].astype(str).str.strip() == str(carrera_id).strip()]
+    if m.empty:
+        return str(carrera_id).strip()
+    return str(m.iloc[0].get("nombre_oficial", carrera_id)).strip()
 
 
 # ============================================================
@@ -247,6 +299,12 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
+    # Mapeo a CARRERA_ID usando CAT_CARRERAS
+    # ---------------------------
+    df_cat = _get_catalogo_carreras_df()
+    df, col_carrera_origen = _add_carrera_id(df)
+
+    # ---------------------------
     # Validación mapa
     # ---------------------------
     required_cols = {"header_exacto", "scale_code", "header_num"}
@@ -293,7 +351,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         years += sorted(df[fecha_col].dt.year.dropna().unique().astype(int).tolist(), reverse=True)
 
     if vista == "Dirección General":
-        carrera_col = _best_carrera_col(df)
         carrera_sel = "(Todas)"
 
         c1, c2, c3 = st.columns([1.2, 1.0, 2.8])
@@ -302,13 +359,20 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         with c2:
             year_sel = st.selectbox("Año", years, index=0)
         with c3:
-            if carrera_col:
-                opts = ["(Todas)"] + sorted(df[carrera_col].dropna().astype(str).str.strip().unique().tolist())
+            if not df_cat.empty:
+                # Selector por NOMBRE OFICIAL (limpio)
+                opts = ["(Todas)"] + sorted(df_cat["nombre_oficial"].dropna().astype(str).unique().tolist())
                 carrera_sel = st.selectbox("Carrera/Servicio", opts, index=0)
             else:
-                st.info("No encontré una columna válida para filtrar por Carrera/Servicio en PROCESADO.")
-                carrera_col = None
-                carrera_sel = "(Todas)"
+                # Fallback: selector por la columna origen
+                if col_carrera_origen:
+                    opts = ["(Todas)"] + sorted(
+                        df[col_carrera_origen].dropna().astype(str).str.strip().unique().tolist()
+                    )
+                    carrera_sel = st.selectbox("Carrera/Servicio", opts, index=0)
+                else:
+                    st.info("No encontré columna válida de carrera/servicio en PROCESADO.")
+                    carrera_sel = "(Todas)"
     else:
         c1, c2 = st.columns([2.4, 1.2])
         with c1:
@@ -316,7 +380,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         with c2:
             year_sel = st.selectbox("Año", years, index=0)
 
-        carrera_col = None
         carrera_sel = (carrera or "").strip()
 
     st.divider()
@@ -330,25 +393,33 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         f = f[f[fecha_col].dt.year == int(year_sel)]
 
     if vista == "Dirección General":
-        if carrera_col and carrera_sel != "(Todas)":
-            f = f[f[carrera_col].astype(str).str.strip() == str(carrera_sel).strip()]
+        if carrera_sel != "(Todas)":
+            if not df_cat.empty:
+                carrera_id_sel = mapear_carrera_id(carrera_sel, df_cat)
+                if carrera_id_sel is not None:
+                    f = f[f["CARRERA_ID"] == carrera_id_sel]
+                else:
+                    # fallback por texto si no mapea
+                    if col_carrera_origen:
+                        f = f[f[col_carrera_origen].astype(str).str.strip() == str(carrera_sel).strip()]
+            else:
+                if col_carrera_origen:
+                    f = f[f[col_carrera_origen].astype(str).str.strip() == str(carrera_sel).strip()]
     else:
-        if modalidad == "Preparatoria":
-            pass
-        else:
-            candidates = [
-                c for c in ["Carrera_Catalogo", "Servicio", "Selecciona el programa académico que estudias"]
-                if c in f.columns
-            ]
-            if not candidates:
-                st.warning("No encontré columnas para filtrar por carrera en esta modalidad.")
-                return
-
-            target = str(carrera_sel).strip()
-            mask = False
-            for c in candidates:
-                mask = mask | (f[c].astype(str).str.strip() == target)
-            f = f[mask]
+        # DC: filtrar por CARRERA_ID cuando haya catálogo
+        if modalidad != "Preparatoria":
+            if not df_cat.empty:
+                carrera_id_fix = mapear_carrera_id(carrera_sel, df_cat)
+                if carrera_id_fix is not None:
+                    f = f[f["CARRERA_ID"] == carrera_id_fix]
+                else:
+                    # fallback por texto
+                    if col_carrera_origen:
+                        f = f[f[col_carrera_origen].astype(str).str.strip() == str(carrera_sel).strip()]
+            else:
+                # sin catálogo
+                if col_carrera_origen:
+                    f = f[f[col_carrera_origen].astype(str).str.strip() == str(carrera_sel).strip()]
 
     st.caption(f"Hoja usada: **PROCESADO** | Registros filtrados: **{len(f)}**")
     if len(f) == 0:
@@ -498,19 +569,15 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     if tab_comp:
         with tab_comp:
             st.markdown("### Comparativo entre carreras (por sección) — tablas")
-            carrera_col = _best_carrera_col(f)
-            if not carrera_col:
-                st.warning("No encontré una columna válida de Carrera/Servicio para hacer el comparativo.")
+
+            # Si DG filtró una carrera específica, ya no hay comparativo real
+            if vista == "Dirección General" and "carrera_sel" in locals() and carrera_sel != "(Todas)":
+                st.info("Para ver comparativo entre carreras, selecciona **(Todas)** en el filtro Carrera/Servicio.")
                 return
 
-            # Si DG filtró a una carrera específica dentro del módulo, ya no hay comparativo real
-            if vista == "Dirección General":
-                # Cuando carrera_sel != (Todas), el usuario ya acotó
-                if "carrera_sel" in locals() and carrera_sel != "(Todas)":
-                    st.info("Para ver comparativo entre carreras, selecciona **(Todas)** en el filtro Carrera/Servicio.")
-                    return
+            # Si hay catálogo, agrupamos por CARRERA_ID; si no, por columna origen
+            use_catalog = (not df_cat.empty) and ("CARRERA_ID" in f.columns)
 
-            # Armamos una tabla por sección
             for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
                 cols_l = [c for c in g["header_num"].tolist() if c in f.columns and c in likert_cols]
                 cols_y = [c for c in g["header_num"].tolist() if c in f.columns and c in yesno_cols]
@@ -519,29 +586,46 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     continue
 
                 rows_comp = []
-                for car, dfc in f.groupby(carrera_col):
-                    car = str(car).strip()
-                    if not car:
-                        continue
+                if use_catalog:
+                    for cid, dfc in f.groupby("CARRERA_ID"):
+                        cid = str(cid).strip()
+                        if not cid or cid.lower() == "none":
+                            continue
+                        row = {"Carrera": _nombre_oficial_por_id(cid, df_cat)}
 
-                    row = {"Carrera": car}
+                        if cols_l:
+                            val_l = pd.to_numeric(dfc[cols_l].stack(), errors="coerce").mean()
+                            row["Promedio Likert"] = float(val_l) if pd.notna(val_l) else pd.NA
+                        if cols_y:
+                            val_y = pd.to_numeric(dfc[cols_y].stack(), errors="coerce").mean() * 100
+                            row["% Sí (Sí/No)"] = float(val_y) if pd.notna(val_y) else pd.NA
 
-                    if cols_l:
-                        val_l = pd.to_numeric(dfc[cols_l].stack(), errors="coerce").mean()
-                        row["Promedio Likert"] = float(val_l) if pd.notna(val_l) else pd.NA
+                        rows_comp.append(row)
+                else:
+                    if not col_carrera_origen:
+                        st.warning("No encontré columna válida de carrera para hacer el comparativo.")
+                        return
+                    for car, dfc in f.groupby(col_carrera_origen):
+                        car = str(car).strip()
+                        if not car:
+                            continue
+                        row = {"Carrera": car}
 
-                    if cols_y:
-                        val_y = pd.to_numeric(dfc[cols_y].stack(), errors="coerce").mean() * 100
-                        row["% Sí (Sí/No)"] = float(val_y) if pd.notna(val_y) else pd.NA
+                        if cols_l:
+                            val_l = pd.to_numeric(dfc[cols_l].stack(), errors="coerce").mean()
+                            row["Promedio Likert"] = float(val_l) if pd.notna(val_l) else pd.NA
+                        if cols_y:
+                            val_y = pd.to_numeric(dfc[cols_y].stack(), errors="coerce").mean() * 100
+                            row["% Sí (Sí/No)"] = float(val_y) if pd.notna(val_y) else pd.NA
 
-                    rows_comp.append(row)
+                        rows_comp.append(row)
 
                 if not rows_comp:
                     continue
 
                 comp_df = pd.DataFrame(rows_comp)
 
-                # Orden: si hay Likert, ordenar por Likert; si no, por % Sí
+                # Orden
                 if "Promedio Likert" in comp_df.columns:
                     comp_df = comp_df.sort_values("Promedio Likert", ascending=False, na_position="last")
                 elif "% Sí (Sí/No)" in comp_df.columns:
