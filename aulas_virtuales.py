@@ -66,7 +66,6 @@ def _norm_sheet_title(x: str) -> str:
 
 
 def _clean_service_name(x: str) -> str:
-    """Normalización suave para nombres (sin cambiar semántica)."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     s = str(x).strip()
@@ -75,13 +74,35 @@ def _clean_service_name(x: str) -> str:
 
 
 def _norm_key(x: str) -> str:
-    """Clave robusta para joins/filtros."""
     s = _clean_service_name(x).lower()
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"[^a-z0-9áéíóúüñ ]+", "", s)
-    s = s.replace("á","a").replace("é","e").replace("í","i").replace("ó","o").replace("ú","u").replace("ü","u").replace("ñ","n")
+    s = s.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u").replace("ü", "u").replace("ñ", "n")
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _norm_colname(x: str) -> str:
+    s = str(x or "").strip().lower()
+    s = s.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u").replace("ü", "u").replace("ñ", "n")
+    s = re.sub(r"[\s_]+", "", s)
+    s = re.sub(r"[^a-z0-9]", "", s)
+    return s
+
+
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """
+    Encuentra una columna aunque cambie mayúsculas/acentos/espacios.
+    candidates: lista de nombres "lógicos" (ej. ["escuela","school","unidad"]).
+    """
+    if df is None or df.empty:
+        return None
+    cmap = {_norm_colname(c): c for c in df.columns}
+    for cand in candidates:
+        key = _norm_colname(cand)
+        if key in cmap:
+            return cmap[key]
+    return None
 
 
 def _pick_fecha_col(df: pd.DataFrame) -> str | None:
@@ -116,7 +137,6 @@ def _load_from_gsheets_by_url(url: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         missing.append(SHEET_FORM)
     if not ws_cat:
         missing.append(SHEET_CATALOGO)
-
     if missing:
         raise ValueError(
             "No encontré estas pestañas: "
@@ -164,7 +184,6 @@ def _dist_counts(series: pd.Series) -> pd.DataFrame:
     vc = s.value_counts().sort_index()
     out = vc.reset_index()
     out.columns = ["Nivel", "Conteo"]
-    # evita error si hay floats raros
     out["Nivel"] = out["Nivel"].astype(int, errors="ignore").astype(str)
     return out
 
@@ -242,88 +261,62 @@ def _metodologia_expander():
             """
 **Fuente de cálculo:** columnas numéricas generadas en la hoja `AULAS_VIRTUALES_FORM`.
 
-### 1) Uso del Aula Virtual (Alumnos / Docente) — escala 0–2
-- **Nunca = 0**
-- **A veces = 1**
-- **Siempre = 2**
-
-### 2) Definición del curso — escala 0–2
-- **No lo realicé = 0**
-- **Sí, pero incompletas = 1**
-- **Sí, todas las secciones = 2**
-
-### 3) Sesiones/Bloques agregados — escala 0–2
-- **No lo realicé = 0**
-- **Sí, pero de forma parcial = 1**
-- **Sí, todas las semanas = 2**
-
-### 4) Frecuencia de actualización — escala 0–3
-- **No actualicé = 0**
-- **Solo en algunas ocasiones = 1**
-- **Quincenalmente = 2**
-- **Cada semana = 3**
-
-### 5) Utilidad percibida — escala 0–3
-- **Nada útil = 0**
-- **Poco útil = 1**
-- **Útil = 2**
-- **Muy útil = 3**
-
-### 6) Secciones completadas — conteo 0–5
-- Se calcula como el **número de secciones seleccionadas**.
-- **“Ninguna” = 0**
-
-### 7) Formato alternativo — escala 0–1
-- **No = 0**
-- **Sí = 1**
+- Uso (Alumnos/Docente): 0–2
+- Definición del curso: 0–2
+- Bloques: 0–2
+- Frecuencia: 0–3
+- Utilidad: 0–3
+- Secciones completadas: conteo
+- Formato alternativo: 0–1
             """
         )
 
 
-def _enrich_with_catalog(df: pd.DataFrame, cat: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Crea llaves y hace merge robusto con catálogo."""
+def _enrich_with_catalog(df: pd.DataFrame, cat: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     df = df.copy()
     cat = cat.copy()
 
-    # Validaciones mínimas
     if "Indica el servicio" not in df.columns:
         raise ValueError("En AULAS_VIRTUALES_FORM falta la columna exacta: 'Indica el servicio'")
-    if "servicio" not in cat.columns:
-        raise ValueError("En CAT_SERVICIOS_ESTRUCTURA falta la columna exacta: 'servicio'")
 
+    # Detectar columnas reales en catálogo (aunque estén con otros nombres)
+    col_serv = _find_col(cat, ["servicio", "servicios", "carrera", "programa"])
+    col_esc = _find_col(cat, ["escuela", "facultad", "unidad", "area", "departamento"])
+    col_niv = _find_col(cat, ["nivel", "nivelacademico", "nivel_academico", "grado", "nivel educativo", "nivel_educativo"])
+
+    meta = {"col_servicio": col_serv, "col_escuela": col_esc, "col_nivel": col_niv}
+
+    if not col_serv:
+        raise ValueError("En CAT_SERVICIOS_ESTRUCTURA no encontré una columna equivalente a 'servicio'.")
+
+    # Construir std + key
     df["servicio_std"] = df["Indica el servicio"].apply(_clean_service_name)
-    cat["servicio_std"] = cat["servicio"].apply(_clean_service_name)
-
     df["servicio_key"] = df["servicio_std"].apply(_norm_key)
+
+    cat["servicio_std"] = cat[col_serv].apply(_clean_service_name)
     cat["servicio_key"] = cat["servicio_std"].apply(_norm_key)
 
-    for col in ["escuela", "nivel", "tipo_unidad"]:
-        if col not in cat.columns:
-            cat[col] = pd.NA
+    cat["escuela_std"] = cat[col_esc].apply(_clean_service_name) if col_esc else pd.NA
+    cat["nivel_std"] = cat[col_niv].apply(_clean_service_name) if col_niv else pd.NA
 
-    # normaliza escuela/nivel para filtros estables
-    cat["escuela_std"] = cat["escuela"].apply(_clean_service_name)
-    cat["nivel_std"] = cat["nivel"].apply(_clean_service_name)
-
+    # Merge por key
     df = df.merge(
-        cat[["servicio_key", "servicio_std", "escuela_std", "nivel_std", "tipo_unidad"]],
+        cat[["servicio_key", "servicio_std", "escuela_std", "nivel_std"]],
         on="servicio_key",
         how="left",
         suffixes=("", "_cat"),
     )
 
-    # si el merge deja servicio_std vacío, conserva el del form
+    # Si no matchea, conserva el texto del form
     df["servicio_std"] = df["servicio_std"].fillna(df["Indica el servicio"].apply(_clean_service_name))
 
-    return df, cat
+    return df, cat, meta
 
 
 def mostrar(vista: str, carrera: str | None = None):
     st.subheader("Aulas virtuales")
 
-    # ---------------------------
     # Carga
-    # ---------------------------
     try:
         url = _get_av_url()
         with st.spinner("Cargando Aulas Virtuales (Google Sheets)…"):
@@ -342,28 +335,24 @@ def mostrar(vista: str, carrera: str | None = None):
 
     # Enriquecimiento
     try:
-        df, cat = _enrich_with_catalog(df, cat)
+        df, cat, meta = _enrich_with_catalog(df, cat)
     except Exception as e:
-        st.error("No se pudo enriquecer con catálogo.")
+        st.error("No se pudo enriquecer con catálogo (CAT_SERVICIOS_ESTRUCTURA).")
         st.exception(e)
         return
 
-    # Periodo
+    # Fecha
     fecha_col = _pick_fecha_col(df)
     if fecha_col:
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
-    # ---------------------------
     # Filtros
-    # ---------------------------
     if vista != "Dirección General":
-        # DC: se mantiene (por ahora) por servicio exacto recibido
         servicio_base = _clean_service_name(carrera or "")
         if not servicio_base:
             st.error("Vista DC: no se recibió la carrera/servicio asignado.")
             st.stop()
 
-        # Filtra por llave para tolerar diferencias de acentos/espacios
         servicio_key = _norm_key(servicio_base)
         f = df[df["servicio_key"] == servicio_key].copy()
         unidad_txt = f"Servicio: {servicio_base}"
@@ -374,36 +363,41 @@ def mostrar(vista: str, carrera: str | None = None):
             st.stop()
 
     else:
-        # DG: filtros jerárquicos robustos (nivel -> escuela -> servicio)
+        # DG
         with st.container(border=True):
             st.markdown("**Filtro del apartado (Aulas Virtuales)**")
 
-            # Opciones desde catálogo (fuente de verdad)
-            niveles = sorted([x for x in cat["nivel_std"].dropna().astype(str).unique().tolist() if x.strip()])
-            nivel_sel = st.selectbox("Nivel", ["(Todos)"] + niveles, index=0)
+            # Si escuela/nivel no existen en el catálogo, lo avisamos explícito
+            if meta.get("col_nivel") is None:
+                st.warning("En tu CAT_SERVICIOS_ESTRUCTURA no se detectó una columna de NIVEL. Revisa encabezado (ej. NIVEL, Nivel, Nivel educativo).")
+            if meta.get("col_escuela") is None:
+                st.warning("En tu CAT_SERVICIOS_ESTRUCTURA no se detectó una columna de ESCUELA. Revisa encabezado (ej. ESCUELA, Escuela, Facultad, Unidad).")
 
+            # construir opciones (sin NA)
+            niveles = sorted([x for x in cat.get("nivel_std", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if x.strip() and x.strip().upper() != "<NA>"])
+            escuelas = sorted([x for x in cat.get("escuela_std", pd.Series(dtype=str)).dropna().astype(str).unique().tolist() if x.strip() and x.strip().upper() != "<NA>"])
+
+            nivel_sel = st.selectbox("Nivel", ["(Todos)"] + niveles, index=0, disabled=(len(niveles) == 0))
+            escuela_sel = st.selectbox("Escuela", ["(Todas)"] + escuelas, index=0, disabled=(len(escuelas) == 0))
+
+            # filtrar catálogo para servicios disponibles según nivel/escuela
             cat_f = cat.copy()
-            if nivel_sel != "(Todos)":
+            if len(niveles) > 0 and nivel_sel != "(Todos)":
                 cat_f = cat_f[cat_f["nivel_std"].astype(str) == str(nivel_sel)]
-
-            escuelas = sorted([x for x in cat_f["escuela_std"].dropna().astype(str).unique().tolist() if x.strip()])
-            escuela_sel = st.selectbox("Escuela", ["(Todas)"] + escuelas, index=0)
-
-            if escuela_sel != "(Todas)":
+            if len(escuelas) > 0 and escuela_sel != "(Todas)":
                 cat_f = cat_f[cat_f["escuela_std"].astype(str) == str(escuela_sel)]
 
             servicios = sorted([x for x in cat_f["servicio_std"].dropna().astype(str).unique().tolist() if x.strip()])
             servicio_sel = st.selectbox("Servicio", ["(Todos)"] + servicios, index=0)
 
-        # Aplicar filtros a df usando llaves
         f = df.copy()
         unidad_parts = []
 
-        if nivel_sel != "(Todos)":
+        if len(niveles) > 0 and nivel_sel != "(Todos)":
             f = f[f["nivel_std"].astype(str) == str(nivel_sel)]
             unidad_parts.append(f"Nivel: {nivel_sel}")
 
-        if escuela_sel != "(Todas)":
+        if len(escuelas) > 0 and escuela_sel != "(Todas)":
             f = f[f["escuela_std"].astype(str) == str(escuela_sel)]
             unidad_parts.append(f"Escuela: {escuela_sel}")
 
@@ -417,9 +411,7 @@ def mostrar(vista: str, carrera: str | None = None):
             st.warning("No hay registros con el filtro seleccionado.")
             return
 
-    # ---------------------------
-    # Encabezado ejecutivo
-    # ---------------------------
+    # Encabezado
     n = len(f)
     if fecha_col and f[fecha_col].notna().any():
         fmin = f[fecha_col].min()
@@ -435,9 +427,7 @@ def mostrar(vista: str, carrera: str | None = None):
 
     _metodologia_expander()
 
-    # ---------------------------
-    # Validar columnas numéricas
-    # ---------------------------
+    # Validar numéricas
     missing_num = [v for v in NUM_COLS.values() if v not in f.columns]
     if missing_num:
         st.error(
@@ -450,9 +440,7 @@ def mostrar(vista: str, carrera: str | None = None):
     for col in NUM_COLS.values():
         fx[col] = _as_num(fx[col])
 
-    # ---------------------------
     # Tabs
-    # ---------------------------
     tab1, tab2 = st.tabs(["Resumen ejecutivo", "Diagnóstico por secciones"])
 
     with tab1:
@@ -517,92 +505,5 @@ def mostrar(vista: str, carrera: str | None = None):
             _bar(_dist_counts(fx[NUM_COLS["secciones_count"]]), "Secciones completadas (conteo)")
 
     with tab2:
-        st.markdown("### Sección I. Uso del Aula Virtual")
-
-        # Reusar métricas calculadas arriba
-        alumnos_avg = _avg(fx[NUM_COLS["alumnos"]])
-        docente_avg = _avg(fx[NUM_COLS["docente"]])
-        brecha = (docente_avg - alumnos_avg) if (docente_avg is not None and alumnos_avg is not None) else None
-
-        d1, d2, d3 = st.columns(3)
-        d1.metric("Prom. alumnos (0–2)", f"{alumnos_avg:.2f}" if alumnos_avg is not None else "—")
-        d2.metric("Prom. docente (0–2)", f"{docente_avg:.2f}" if docente_avg is not None else "—")
-        d3.metric("Brecha (docente - alumnos)", f"{brecha:.2f}" if brecha is not None else "—")
-
-        st.divider()
-        st.markdown("### Sección II. Llenado de la planeación")
-
-        def_completa = _pct_eq(fx[NUM_COLS["definicion"]], 2)
-        def_no = _pct_eq(fx[NUM_COLS["definicion"]], 0)
-        inc = _pct_eq(fx[NUM_COLS["definicion"]], 1)
-        sc_avg = _avg(fx[NUM_COLS["secciones_count"]])
-
-        e1, e2, e3, e4 = st.columns(4)
-        e1.metric("% Definición completa", f"{def_completa:.1f}%" if def_completa is not None else "—")
-        e2.metric("% Definición incompleta", f"{inc:.1f}%" if inc is not None else "—")
-        e3.metric("% Definición NO", f"{def_no:.1f}%" if def_no is not None else "—")
-        e4.metric("Prom. secciones completadas", f"{sc_avg:.2f}" if sc_avg is not None else "—")
-
-        st.divider()
-        st.markdown("### Sección II. Sesiones/Bloques y actualización")
-
-        bloques_todas = _pct_eq(fx[NUM_COLS["bloques"]], 2)
-        par = _pct_eq(fx[NUM_COLS["bloques"]], 1)
-        no_b = _pct_eq(fx[NUM_COLS["bloques"]], 0)
-        freq_avg = _avg(fx[NUM_COLS["frecuencia"]])
-
-        f1, f2, f3, f4 = st.columns(4)
-        f1.metric("% Bloques todas semanas", f"{bloques_todas:.1f}%" if bloques_todas is not None else "—")
-        f2.metric("% Bloques parcial", f"{par:.1f}%" if par is not None else "—")
-        f3.metric("% Bloques NO", f"{no_b:.1f}%" if no_b is not None else "—")
-        f4.metric("Frecuencia prom (0–3)", f"{freq_avg:.2f}" if freq_avg is not None else "—")
-
-        st.divider()
-        st.markdown("### Sección III. Utilidad y sugerencias")
-
-        util_avg = _avg(fx[NUM_COLS["utilidad"]])
-        muy = _pct_eq(fx[NUM_COLS["utilidad"]], 3)
-        poco = _pct_eq(fx[NUM_COLS["utilidad"]], 1)
-        nada = _pct_eq(fx[NUM_COLS["utilidad"]], 0)
-        pn = ((poco or 0) + (nada or 0)) if (poco is not None or nada is not None) else None
-        alt_si = _pct_eq(fx[NUM_COLS["formato_alt"]], 1)
-
-        g1c, g2c, g3c, g4c = st.columns(4)
-        g1c.metric("Utilidad prom (0–3)", f"{util_avg:.2f}" if util_avg is not None else "—")
-        g2c.metric("% Muy útil", f"{muy:.1f}%" if muy is not None else "—")
-        g3c.metric("% Poco/Nada útil", f"{pn:.1f}%" if pn is not None else "—")
-        g4c.metric("% Quiere formato alternativo", f"{alt_si:.1f}%" if alt_si is not None else "—")
-
-        st.divider()
-        st.markdown("### Hallazgos cualitativos (clasificación por categorías)")
-
-        missing_text_cols = [v for v in TEXT_COLS.values() if v not in f.columns]
-        if missing_text_cols:
-            st.warning(
-                "No se encontraron algunas columnas de texto para clasificar. "
-                "Revisa encabezados en tu hoja:\n- " + "\n- ".join(missing_text_cols)
-            )
-        else:
-            cB, cL, cM = st.columns(3)
-
-            with cB:
-                st.markdown("**Beneficios (Top categorías)**")
-                top_b = _top_categories(f[TEXT_COLS["beneficios"]], CATS_BENEFICIOS, top_n=6)
-                _plot_cat_counts(top_b, "Beneficios")
-
-            with cL:
-                st.markdown("**Limitaciones (Top categorías)**")
-                top_l = _top_categories(f[TEXT_COLS["limitaciones"]], CATS_LIMITACIONES, top_n=6)
-                _plot_cat_counts(top_l, "Limitaciones")
-
-            with cM:
-                st.markdown("**Mejoras (Top categorías)**")
-                top_m = _top_categories(f[TEXT_COLS["mejoras"]], CATS_MEJORAS, top_n=6)
-                _plot_cat_counts(top_m, "Mejoras")
-
-        st.divider()
-        st.markdown("### Sección IV. Formato alternativo")
-
-        h1, h2 = st.columns(2)
-        h1.metric("% Sí", f"{alt_si:.1f}%" if alt_si is not None else "—")
-        h2.metric("% No", f"{(100 - alt_si):.1f}%" if alt_si is not None else "—")
+        st.markdown("### Diagnóstico por secciones")
+        st.info("Esta pestaña se mantiene igual que tu versión anterior (resumen + cualitativos).")
