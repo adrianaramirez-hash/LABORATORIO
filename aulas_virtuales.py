@@ -166,12 +166,38 @@ def mostrar(vista: str, carrera: str | None = None):
     # =========================
     # FILTROS
     # =========================
-    if vista == "Dirección General":
-        opciones = ["(Todos)"] + sorted(df["FILTRO_LABEL"].dropna().unique().tolist())
-        sel = st.selectbox("Servicio / Unidad", opciones)
+ if vista == "Dirección General":
+    # Construye catálogo único por ID (evita que labels duplicados “no filtren”)
+    cat_filtro = (
+        df[["FILTRO_ID", "FILTRO_LABEL"]]
+        .dropna(subset=["FILTRO_LABEL"])
+        .copy()
+    )
+    cat_filtro["FILTRO_ID"] = cat_filtro["FILTRO_ID"].astype(str)
+    cat_filtro["FILTRO_LABEL"] = cat_filtro["FILTRO_LABEL"].astype(str).str.strip()
 
-        if sel == "(Todos)":
-            f = df.copy()
+    # Si hay labels repetidos, se quedan varias filas con distintos IDs.
+    # Para que el usuario vea algo estable, mostramos label + id en el selector.
+    cat_filtro = cat_filtro.drop_duplicates()
+
+    cat_filtro["OPCION"] = cat_filtro["FILTRO_LABEL"] + "  —  [" + cat_filtro["FILTRO_ID"] + "]"
+
+    opciones = ["(Todos)"] + sorted(cat_filtro["OPCION"].unique().tolist())
+    sel = st.selectbox("Servicio / Unidad", opciones)
+
+    if sel == "(Todos)":
+        f = df.copy()
+    else:
+        # Extrae el ID entre corchetes: [XXXX]
+        m = re.search(r"\[([^\]]+)\]\s*$", sel)
+        sel_id = m.group(1).strip() if m else ""
+        f = df[df["FILTRO_ID"].astype(str).str.strip() == sel_id].copy()
+
+    # Diagnóstico mínimo (para confirmar que SÍ está filtrando)
+    st.caption(f"Filtro aplicado (DG): {sel} | Registros filtrados: {len(f)}")
+else:
+    ...
+
         else:
             f = df[df["FILTRO_LABEL"] == sel].copy()
 
