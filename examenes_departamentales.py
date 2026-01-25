@@ -8,12 +8,9 @@ import streamlit as st
 import altair as alt
 import gspread
 
-# ✅ Catálogo maestro (CAT_CARRERAS) para variantes
-from catalogos import resolver_carrera
-
 SHEET_BASE = "BASE_CONSOLIDADA"
 SHEET_RESP = "RESPUESTAS_LARGAS"
-SHEET_CATALOGO = "CATALOGO_EXAMENES"  # opcional (mapea display<->canon por versión)
+SHEET_CATALOGO = "CATALOGO_EXAMENES"  # NUEVO
 
 
 # ============================================================
@@ -174,7 +171,7 @@ def _best_match_letter(resp_text, optA, optB, optC, optD, threshold=0.86):
 
 
 # ============================================================
-# Catálogo interno del módulo (opcional): resolver display -> canon por versión
+# Catálogo: resolver nombre bonito -> carrera canónica
 # ============================================================
 def _clean_key(s):
     """Clave comparable (sin acentos, minúsculas, espacios normalizados)."""
@@ -260,32 +257,6 @@ def _display_from_canon(canon_value, version_value, map_canon_to_display):
 
 
 # ============================================================
-# Catálogo maestro (CAT_CARRERAS): variantes
-# ============================================================
-def _resolver_variantes_desde_catalogo_maestro(display_input: str):
-    """
-    Usa catalogos.resolver_carrera() para obtener variantes del CAT_CARRERAS.
-    Regresa: (canon_display, variantes_list) o (None, None) si no resuelve.
-    """
-    try:
-        info = resolver_carrera(display_input)
-    except Exception:
-        info = None
-
-    if not info:
-        return None, None
-
-    variantes = info.get("variantes") or []
-    variantes = [str(x).strip() for x in variantes if str(x).strip()]
-    if not variantes:
-        return None, None
-
-    canon_display = info.get("nombre_oficial") or display_input
-    canon_display = str(canon_display).strip() if canon_display else display_input
-    return canon_display, variantes
-
-
-# ============================================================
 # Gráfica
 # ============================================================
 def _bar_h(df, cat, val, title):
@@ -311,6 +282,10 @@ def _bar_h(df, cat, val, title):
 # Examen (listados) — sin mencionar "sin respuestas" en la UI
 # ============================================================
 def _pick_question_col(base: pd.DataFrame):
+    """
+    Detecta la columna de enunciado/pregunta en BASE_CONSOLIDADA.
+    Ajusta aquí si tu nombre exacto es distinto.
+    """
     candidates = [
         "Pregunta",
         "Enunciado",
@@ -331,6 +306,11 @@ def _pick_question_col(base: pd.DataFrame):
 
 
 def _build_public_exam_df(base_f: pd.DataFrame):
+    """
+    Regresa DF del EXAMEN (reactivos incluidos) construido desde BASE:
+    - No incluye clave / justificaciones.
+    - Se arma por carrera+versión.
+    """
     if base_f is None or base_f.empty:
         return pd.DataFrame()
 
@@ -345,16 +325,12 @@ def _build_public_exam_df(base_f: pd.DataFrame):
 
     out = base_f.copy()
 
+    # Blindaje explícito: eliminar claves si existen
     for sensitive in ["Clave", "Clave_letter"]:
         if sensitive in out.columns:
             out = out.drop(columns=[sensitive], errors="ignore")
 
-    # si viene mezclado por variantes, igual dedup por Version+ID
-    dedupe_subset = [c for c in ["Version", "ID_reactivo"] if c in out.columns]
-    if dedupe_subset:
-        out = out.drop_duplicates(subset=dedupe_subset, keep="first")
-    else:
-        out = out.drop_duplicates(keep="first")
+    out = out.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
 
     keep = [c for c in cols if c in out.columns]
     out = out[keep].copy()
@@ -366,6 +342,10 @@ def _build_public_exam_df(base_f: pd.DataFrame):
 
 
 def _download_df_buttons(df, filename_prefix: str):
+    """
+    Descarga el listado del examen.
+    Nota: intencionalmente NO usamos el texto "sin respuestas" en la UI.
+    """
     if df is None or getattr(df, "empty", True):
         return
     csv = df.to_csv(index=False).encode("utf-8-sig")
@@ -393,11 +373,7 @@ def _render_tab_examen_por_area(exam_pub, filename_prefix: str):
 
     st.divider()
     st.markdown("#### Reactivos incluidos")
-    detalle_cols = [
-        c
-        for c in ["Area", "Materia", "ID_reactivo", "Pregunta", "A", "B", "C", "D"]
-        if c in exam_pub.columns
-    ]
+    detalle_cols = [c for c in ["Area", "Materia", "ID_reactivo", "Pregunta", "A", "B", "C", "D"] if c in exam_pub.columns]
     detalle = exam_pub[detalle_cols].sort_values(["Area", "Materia", "ID_reactivo"])
     st.dataframe(detalle, use_container_width=True, hide_index=True)
 
@@ -554,60 +530,10 @@ def _prepare(base, resp):
     return base, resp, df, by_alumno
 
 
-def _agg_by_alumno_for_variantes(ba_f: pd.DataFrame) -> pd.DataFrame:
-    """
-    Si una carrera viene con variantes (múltiples nombres), agregamos por AlumnoID+Version
-    para obtener métricas consistentes.
-    """
-    if ba_f is None or ba_f.empty:
-        return ba_f
-
-    cols_needed = {"AlumnoID", "Version", "Puntos_obtenidos", "Puntos_posibles_examen", "Reactivos_examen", "Respondidas_validas"}
-    if not cols_needed.issubset(set(ba_f.columns)):
-        return ba_f
-
-    agg = (
-        ba_f.groupby(["AlumnoID", "Version"], as_index=False)
-        .agg(
-            Puntos_obtenidos=("Puntos_obtenidos", "sum"),
-            Puntos_posibles_examen=("Puntos_posibles_examen", "first"),
-            Reactivos_examen=("Reactivos_examen", "first"),
-            Respondidas_validas=("Respondidas_validas", "sum"),
-        )
-    )
-
-    agg["Score"] = agg.apply(
-        lambda r: (r["Puntos_obtenidos"] / r["Puntos_posibles_examen"])
-        if pd.notna(r["Puntos_posibles_examen"]) and float(r["Puntos_posibles_examen"]) > 0
-        else None,
-        axis=1,
-    )
-
-    agg["Promedio_0_10"] = pd.to_numeric(agg["Score"], errors="coerce") * 10.0
-    agg["Porcentaje_0_100"] = pd.to_numeric(agg["Score"], errors="coerce") * 100.0
-    agg["Cobertura"] = (
-        agg.apply(
-            lambda r: (r["Respondidas_validas"] / r["Reactivos_examen"])
-            if pd.notna(r["Reactivos_examen"]) and float(r["Reactivos_examen"]) > 0
-            else None,
-            axis=1,
-        )
-        * 100.0
-    )
-    return agg
-
-
-def _detalle_carrera_variantes(df, base, by_alumno, carreras_variantes, version):
-    """
-    carreras_variantes: lista de nombres posibles (variantes) para la misma carrera.
-    """
-    carreras_variantes = [str(x).strip() for x in (carreras_variantes or []) if str(x).strip()]
-    if not carreras_variantes:
-        return None, None, None, 0, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    base_f = base[base["Carrera"].isin(carreras_variantes)].copy()
-    df_f = df[df["Carrera"].isin(carreras_variantes)].copy()
-    ba_f = by_alumno[by_alumno["Carrera"].isin(carreras_variantes)].copy()
+def _detalle_carrera(df, base, by_alumno, carrera, version):
+    base_f = base[base["Carrera"] == carrera].copy()
+    df_f = df[df["Carrera"] == carrera].copy()
+    ba_f = by_alumno[by_alumno["Carrera"] == carrera].copy()
 
     if version and version != "Todas":
         base_f = base_f[base_f["Version"] == version].copy()
@@ -617,13 +543,10 @@ def _detalle_carrera_variantes(df, base, by_alumno, carreras_variantes, version)
     if base_f.empty or df_f.empty or ba_f.empty:
         return None, None, None, 0, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    # ✅ unifica alumnos si hay múltiples variantes
-    ba_f2 = _agg_by_alumno_for_variantes(ba_f)
-
-    prom_0_10 = float(pd.to_numeric(ba_f2["Promedio_0_10"], errors="coerce").mean())
-    prom_pct = float(pd.to_numeric(ba_f2["Porcentaje_0_100"], errors="coerce").mean())
-    cov_pct = float(pd.to_numeric(ba_f2["Cobertura"], errors="coerce").mean())
-    n_respondieron = int(ba_f2["AlumnoID"].nunique())
+    prom_0_10 = float(pd.to_numeric(ba_f["Promedio_0_10"], errors="coerce").mean())
+    prom_pct = float(pd.to_numeric(ba_f["Porcentaje_0_100"], errors="coerce").mean())
+    cov_pct = float(pd.to_numeric(ba_f["Cobertura"], errors="coerce").mean())
+    n_respondieron = int(ba_f["AlumnoID"].nunique())
 
     area_pos = (
         base_f.groupby("Area", as_index=False)["Puntos"]
@@ -733,34 +656,18 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
             st.warning("En vista Director de carrera, selecciona una Aplicación / Versión específica.")
             return
 
-        # 1) Intento A: catálogo interno del módulo (si existe)
         carrera_canon = _resolve_canon_from_display(display_input, sel_version, map_display_to_canon)
+        if not carrera_canon:
+            carrera_canon = display_input
 
-        # 2) Intento B (✅ clave): catálogo maestro CAT_CARRERAS -> variantes
-        canon_maestro, variantes_maestro = _resolver_variantes_desde_catalogo_maestro(display_input)
-
-        # Preferencia:
-        # - Si el catálogo maestro resolvió variantes => usamos variantes para filtrar
-        # - Si no resolvió, pero el catálogo interno sí dio canon => filtramos por canon
-        # - Si ninguno resolvió => filtramos por display_input (fallback)
-        if variantes_maestro:
-            carrera_etiqueta = canon_maestro or display_input
-            carreras_variantes = variantes_maestro
-        elif carrera_canon:
-            carrera_etiqueta = carrera_canon
-            carreras_variantes = [carrera_canon]
-        else:
-            carrera_etiqueta = display_input
-            carreras_variantes = [display_input]
-
-        prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df, exam_pub = _detalle_carrera_variantes(
-            df_v, base_v, ba_v, carreras_variantes, sel_version
+        prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df, exam_pub = _detalle_carrera(
+            df_v, base_v, ba_v, carrera_canon, sel_version
         )
 
         if prom_0_10 is None:
             st.error("No encontré datos para esa carrera en la versión seleccionada.")
             st.caption(f"Carrera seleccionada (menú): **{display_input}**")
-            st.caption(f"Filtro usado (variantes): **{', '.join(carreras_variantes[:8])}{'…' if len(carreras_variantes) > 8 else ''}**")
+            st.caption(f"Carrera usada para filtrar (canónica): **{carrera_canon}**")
             return
 
         c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
@@ -773,7 +680,6 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
         tab1, tab2, tab3 = st.tabs(["Resultados", "Examen por área", "Examen por materia"])
 
         with tab1:
-            st.markdown(f"### {carrera_etiqueta}")
             st.markdown("### Promedio por área (0–10)")
             st.dataframe(area_df, use_container_width=True, hide_index=True)
             ch_a = _bar_h(area_df, "Area", "Promedio_area", "Promedio (0–10)")
@@ -790,13 +696,13 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
         with tab2:
             _render_tab_examen_por_area(
                 exam_pub=exam_pub,
-                filename_prefix=f"examen_{sel_version}_{re.sub(r'[^a-zA-Z0-9_-]+','_', carrera_etiqueta)[:60]}",
+                filename_prefix=f"examen_{sel_version}_{carrera_canon}",
             )
 
         with tab3:
             _render_tab_examen_por_materia(
                 exam_pub=exam_pub,
-                filename_prefix=f"examen_{sel_version}_{re.sub(r'[^a-zA-Z0-9_-]+','_', carrera_etiqueta)[:60]}",
+                filename_prefix=f"examen_{sel_version}_{carrera_canon}",
             )
 
         return
@@ -870,9 +776,8 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
     idx = opciones_display.index(sel_display)
     sel_carrera_canon = carreras_canon[idx]
 
-    # Para DG en detalle, filtramos por esa "carrera" tal cual (canon del dataset)
-    prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df, exam_pub = _detalle_carrera_variantes(
-        df_v, base_v, ba_v, [sel_carrera_canon], sel_version
+    prom_0_10, prom_pct, cov_pct, n_al, area_df, materia_df, exam_pub = _detalle_carrera(
+        df_v, base_v, ba_v, sel_carrera_canon, sel_version
     )
 
     c1, c2, c3, c4 = st.columns([1.0, 1.0, 1.0, 1.0])
