@@ -738,23 +738,26 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
             .sort_values("Porcentaje", ascending=False)
         )
 
+        # ---- FIX: evitar columnas duplicadas para Altair/Narwhals
         if sel_version != "Todas":
-            resumen["Carrera (display)"] = resumen["Carrera"].apply(
+            resumen["Carrera_display"] = resumen["Carrera"].apply(
                 lambda c: _display_from_canon(c, sel_version, map_canon_to_display)
             )
         else:
-            resumen["Carrera (display)"] = resumen["Carrera"]
+            resumen["Carrera_display"] = resumen["Carrera"]
 
         st.markdown("### Resultados por carrera")
         st.dataframe(
-            resumen[["Carrera (display)", "Promedio_0_10", "Porcentaje", "Cobertura", "Alumnos"]],
+            resumen[["Carrera_display", "Promedio_0_10", "Porcentaje", "Cobertura", "Alumnos"]].rename(
+                columns={"Carrera_display": "Carrera"}
+            ),
             use_container_width=True,
             hide_index=True,
         )
 
         ch = _bar_h(
-            resumen.rename(columns={"Carrera (display)": "Carrera"}),
-            "Carrera",
+            resumen[["Carrera_display", "Porcentaje"]].rename(columns={"Carrera_display": "Carrera_display"}),
+            "Carrera_display",
             "Porcentaje",
             "Porcentaje de acierto (0–100)",
         )
