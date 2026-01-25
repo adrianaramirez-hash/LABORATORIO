@@ -263,3 +263,34 @@ def mapear_carrera_id(texto: str, df_cat: pd.DataFrame) -> Optional[str]:
         return str(cand.iloc[0]["carrera_id"]).strip()
 
     return None
+
+
+# ============================================================
+# Compatibilidad: alias para módulos antiguos
+# ============================================================
+
+def resolver_carrera(texto: str, df_cat: pd.DataFrame) -> Optional[str]:
+    """
+    Alias retrocompatible.
+    Devuelve carrera_id a partir de texto libre usando el catálogo (df_cat).
+    """
+    return mapear_carrera_id(texto, df_cat)
+
+
+def resolver_nombre_oficial(texto: str, df_cat: pd.DataFrame) -> Optional[str]:
+    """
+    Devuelve el nombre_oficial de la carrera (si se puede resolver) a partir de texto libre.
+    Útil cuando un módulo necesita mostrar el nombre canónico.
+    """
+    cid = mapear_carrera_id(texto, df_cat)
+    if not cid or df_cat is None or getattr(df_cat, "empty", True):
+        return None
+
+    if "carrera_id" not in df_cat.columns or "nombre_oficial" not in df_cat.columns:
+        return None
+
+    hit = df_cat[df_cat["carrera_id"].astype(str).str.strip() == str(cid).strip()]
+    if hit.empty:
+        return None
+
+    return str(hit.iloc[0]["nombre_oficial"]).strip()
