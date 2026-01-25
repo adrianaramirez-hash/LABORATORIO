@@ -1,4 +1,4 @@
-# examenes_departamentales.py
+}# examenes_departamentales.py
 import re
 import unicodedata
 from difflib import SequenceMatcher
@@ -17,6 +17,10 @@ SHEET_CATALOGO = "CATALOGO_EXAMENES"  # NUEVO
 # Helpers de carga
 # ============================================================
 def _dedupe_headers(headers):
+    """
+    Asegura encabezados únicos (requerido por Altair/Narwhals).
+    Ej: ["Carrera","Carrera"] -> ["Carrera","Carrera__2"]
+    """
     seen = {}
     out = []
     for h in headers:
@@ -30,6 +34,17 @@ def _dedupe_headers(headers):
     return out
 
 
+def _dedupe_df_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica deduplicación a columnas si vienen repetidas (blindaje)."""
+    if df is None or df.empty:
+        return df
+    cols = list(df.columns)
+    if len(cols) != len(set(cols)):
+        df = df.copy()
+        df.columns = _dedupe_headers(cols)
+    return df
+
+
 def _ws_to_df(sh, ws_title):
     ws = sh.worksheet(ws_title)
     values = ws.get_all_values()
@@ -37,7 +52,8 @@ def _ws_to_df(sh, ws_title):
         return pd.DataFrame()
     headers = _dedupe_headers([h.strip() for h in values[0]])
     rows = values[1:]
-    return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
+    df = pd.DataFrame(rows, columns=headers).replace("", pd.NA)
+    return _dedupe_df_columns(df)
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -200,13 +216,22 @@ def _catalogo_build_maps(catalogo: pd.DataFrame):
     if catalogo is None or catalogo.empty:
         return {}, {}
 
-    needed = {"Carrera", "Version"}
-    if not needed.issubset(set(catalogo.columns)):
+    # Blindaje: si el sheet trae columnas duplicadas, ya se dedupearon, pero
+    # evitamos depender de un nombre ambiguo.
+    cols = list(catalogo.columns)
+    # Tomamos la PRIMERA columna que sea exactamente 'Carrera' (ignora Carrera__2, etc.)
+    carrera_cols = [c for c in cols if str(c).strip() == "Carrera"]
+    version_cols = [c for c in cols if str(c).strip() == "Version"]
+
+    if not carrera_cols or not version_cols:
         return {}, {}
 
+    carrera_col = carrera_cols[0]
+    version_col = version_cols[0]
+
     cat = catalogo.copy()
-    for c in ["Carrera", "Version"]:
-        cat[c] = cat[c].astype(str).str.strip()
+    cat[carrera_col] = cat[carrera_col].astype(str).str.strip()
+    cat[version_col] = cat[version_col].astype(str).str.strip()
 
     display_col = "Notas (opcional)" if "Notas (opcional)" in cat.columns else None
     if display_col:
@@ -217,8 +242,8 @@ def _catalogo_build_maps(catalogo: pd.DataFrame):
     map_canon_to_display = {}
 
     for _, r in cat.iterrows():
-        canon = str(r.get("Carrera", "")).strip()
-        ver = str(r.get("Version", "")).strip()
+        canon = str(r.get(carrera_col, "")).strip()
+        ver = str(r.get(version_col, "")).strip()
 
         if not canon or canon.lower() == "nan" or not ver or ver.lower() == "nan":
             continue
@@ -262,6 +287,14 @@ def _display_from_canon(canon_value, version_value, map_canon_to_display):
 def _bar_h(df, cat, val, title):
     if df is None or df.empty:
         return None
+
+    # Blindaje: Altair/Narwhals exige columnas únicas
+    df = _dedupe_df_columns(df)
+
+    # Si por algún motivo cat/val no existen, no graficamos
+    if cat not in df.columns or val not in df.columns:
+        return None
+
     height = min(900, max(280, len(df) * 26))
     return (
         alt.Chart(df)
@@ -330,7 +363,11 @@ def _build_public_exam_df(base_f: pd.DataFrame):
         if sensitive in out.columns:
             out = out.drop(columns=[sensitive], errors="ignore")
 
-    out = out.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
+    # Blindaje: si hay columnas duplicadas (por origen), dedupe antes de drop_duplicates
+    out = _dedupe_df_columns(out)
+
+    if all(c in out.columns for c in ["Carrera", "Version", "ID_reactivo"]):
+        out = out.drop_duplicates(subset=["Carrera", "Version", "ID_reactivo"], keep="first")
 
     keep = [c for c in cols if c in out.columns]
     out = out[keep].copy()
@@ -417,6 +454,10 @@ def _render_tab_examen_por_materia(exam_pub, filename_prefix: str):
 def _prepare(base, resp):
     required_base = {"Carrera", "Version", "ID_reactivo", "Area", "Materia", "Clave", "Puntos"}
     required_resp = {"Carrera", "Version", "ID_reactivo", "Matricula", "Grupo", "Correo", "Respuesta_alumno"}
+
+    # Blindaje: dedupe por si un sheet trae columnas duplicadas
+    base = _dedupe_df_columns(base)
+    resp = _dedupe_df_columns(resp)
 
     if not required_base.issubset(set(base.columns)):
         raise ValueError(f"BASE_CONSOLIDADA debe contener: {sorted(required_base)}")
@@ -752,9 +793,14 @@ def render_examenes_departamentales(spreadsheet_url, vista=None, carrera=None):
             hide_index=True,
         )
 
+        # Blindaje clave: renombrar el eje a una columna única para el chart
+        resumen_chart = resumen[["Carrera (display)", "Porcentaje"]].copy()
+        resumen_chart = _dedupe_df_columns(resumen_chart)
+        resumen_chart = resumen_chart.rename(columns={"Carrera (display)": "Carrera_display"})
+
         ch = _bar_h(
-            resumen.rename(columns={"Carrera (display)": "Carrera"}),
-            "Carrera",
+            resumen_chart,
+            "Carrera_display",
             "Porcentaje",
             "Porcentaje de acierto (0–100)",
         )
