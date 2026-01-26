@@ -452,50 +452,56 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             st.dataframe(df_line.reset_index(drop=True), use_container_width=True)
 
     # ---------------------------
-    # Focos rojos
+    # Focos rojos (CORREGIDO: orden + sangría)
     # ---------------------------
     with tab2:
         st.markdown("### Casos con promedio ≤ umbral — detalle (ciclo)")
         focos = f[pd.to_numeric(f["promedio"], errors="coerce") <= float(umbral)].copy()
+
         if focos.empty:
             st.info("No hay focos rojos con el umbral seleccionado.")
         else:
             focos["Participación %"] = focos["participacion_pct"]
             focos["Observación encontrada"] = ""
+
             if oc_has_data and oc_prof_col:
                 oc_sub = oc_df.copy()
                 # Intento de acotar observaciones por carrera (si la carrera en OC coincide ya normalizada)
                 if oc_car_col and carrera_key_sel:
                     oc_sub = oc_sub[oc_sub["_car_key"] == carrera_key_sel]
                 oc_keys = set(oc_sub["_prof_key"].dropna().tolist())
-                focos["Observación encontrada"] = focos["_prof_key"].apply(lambda k: "Sí" if k in oc_keys else "No")
+                focos["Observación encontrada"] = focos["_prof_key"].apply(
+                    lambda k: "Sí" if k in oc_keys else "No"
+                )
 
             show_cols = ["profesor", "materia", "grupo", "promedio", "Participación %", "ciclo", "Observación encontrada"]
-out = focos[show_cols].copy()
+            out = focos[show_cols].copy()
 
-# --- Orden de focos rojos ---
-c_ord1, c_ord2 = st.columns([1, 2])
-with c_ord1:
-    orden = st.selectbox("Orden", ["Menor a mayor", "Mayor a menor"], index=0)
-asc = (orden == "Menor a mayor")
+            # --- Orden de focos rojos ---
+            c_ord1, c_ord2 = st.columns([1, 2])
+            with c_ord1:
+                orden = st.selectbox("Orden", ["Menor a mayor", "Mayor a menor"], index=0)
+            asc = (orden == "Menor a mayor")
 
-# Asegurar tipos para ordenar bien
-out["_promedio_num"] = pd.to_numeric(out["promedio"], errors="coerce")
-out["_part_num"] = pd.to_numeric(out["Participación %"], errors="coerce")
+            # Asegurar tipos para ordenar bien
+            out["_promedio_num"] = pd.to_numeric(out["promedio"], errors="coerce")
+            out["_part_num"] = pd.to_numeric(out["Participación %"], errors="coerce")
 
-# Orden primario: promedio; secundarios: participación y profesor (para desempates)
-out = out.sort_values(
-    by=["_promedio_num", "_part_num", "profesor"],
-    ascending=[asc, False, True],
-    na_position="last",
-).drop(columns=["_promedio_num", "_part_num"])
+            # Orden primario: promedio; secundarios: participación y profesor (para desempates)
+            out = (
+                out.sort_values(
+                    by=["_promedio_num", "_part_num", "profesor"],
+                    ascending=[asc, False, True],
+                    na_position="last",
+                )
+                .drop(columns=["_promedio_num", "_part_num"])
+            )
 
-# Wrap al final (ya ordenado)
-out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
-out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
+            # Wrap al final (ya ordenado)
+            out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
+            out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
 
-st.dataframe(out.reset_index(drop=True), use_container_width=True)
-
+            st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
     # ---------------------------
     # Top docentes
