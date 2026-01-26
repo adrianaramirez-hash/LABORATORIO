@@ -471,10 +471,31 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                 focos["Observación encontrada"] = focos["_prof_key"].apply(lambda k: "Sí" if k in oc_keys else "No")
 
             show_cols = ["profesor", "materia", "grupo", "promedio", "Participación %", "ciclo", "Observación encontrada"]
-            out = focos[show_cols].copy()
-            out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
-            out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
-            st.dataframe(out.reset_index(drop=True), use_container_width=True)
+out = focos[show_cols].copy()
+
+# --- Orden de focos rojos ---
+c_ord1, c_ord2 = st.columns([1, 2])
+with c_ord1:
+    orden = st.selectbox("Orden", ["Menor a mayor", "Mayor a menor"], index=0)
+asc = (orden == "Menor a mayor")
+
+# Asegurar tipos para ordenar bien
+out["_promedio_num"] = pd.to_numeric(out["promedio"], errors="coerce")
+out["_part_num"] = pd.to_numeric(out["Participación %"], errors="coerce")
+
+# Orden primario: promedio; secundarios: participación y profesor (para desempates)
+out = out.sort_values(
+    by=["_promedio_num", "_part_num", "profesor"],
+    ascending=[asc, False, True],
+    na_position="last",
+).drop(columns=["_promedio_num", "_part_num"])
+
+# Wrap al final (ya ordenado)
+out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
+out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
+
+st.dataframe(out.reset_index(drop=True), use_container_width=True)
+
 
     # ---------------------------
     # Top docentes
