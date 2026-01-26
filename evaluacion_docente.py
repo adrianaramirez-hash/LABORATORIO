@@ -120,82 +120,6 @@ def _load_sheet_as_df(url: str, sheet_name: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
 
 
-@st.cache_data(show_spinner=False, ttl=300)
-def _load_observaciones_df_from_secret() -> tuple[pd.DataFrame, str | None]:
-    url = st.secrets.get("OC_SHEET_URL", "").strip()
-    if not url:
-        return pd.DataFrame(), None
-
-    sheet_name = st.secrets.get("OC_SHEET_NAME", "").strip()
-    if not sheet_name:
-        candidates = ["FORM", "RESPUESTAS", "DATA", "PROCESADO", "Observacion", "OBSERVACION"]
-    else:
-        candidates = [sheet_name]
-
-    for sn in candidates:
-        try:
-            df = _load_sheet_as_df(url, sn)
-            if not df.empty:
-                fecha_col = _pick_date_col(df)
-                if fecha_col:
-                    df[fecha_col] = pd.to_datetime(df[fecha_col], errors="coerce", dayfirst=True)
-                return df, fecha_col
-        except Exception:
-            continue
-
-    return pd.DataFrame(), None
-
-
-def _pick_prof_col_oc(df: pd.DataFrame) -> str | None:
-    candidates = [
-        "Docente", "docente",
-        "Profesor", "profesor",
-        "Nombre del docente", "Nombre del Docente",
-        "Docente observado", "Docente Observado",
-    ]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        lc = str(c).lower()
-        if "doc" in lc or "prof" in lc:
-            return c
-    return None
-
-
-def _pick_carrera_col_oc(df: pd.DataFrame) -> str | None:
-    candidates = [
-        "Carrera", "carrera",
-        "Servicio", "servicio",
-        "Programa", "programa",
-        "Carrera/Servicio", "Carrera / Servicio",
-    ]
-    for c in candidates:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        lc = str(c).lower()
-        if "carrera" in lc or "servicio" in lc or "programa" in lc:
-            return c
-    return None
-
-
-def _pick_link_col_oc(df: pd.DataFrame) -> str | None:
-    for c in df.columns:
-        lc = str(c).lower()
-        if "link" in lc or "liga" in lc or "evidencia" in lc or "drive" in lc:
-            return c
-    return None
-
-
-def _pick_result_col_oc(df: pd.DataFrame) -> str | None:
-    for c in df.columns:
-        lc = str(c).lower()
-        if any(k in lc for k in ["resultado", "calificacion", "calificación", "puntaje", "score", "cumplimiento"]):
-            return c
-    return None
-
-
 def _promedio_ponderado(dfx: pd.DataFrame) -> float:
     w = pd.to_numeric(dfx["total"], errors="coerce")
     y = pd.to_numeric(dfx["promedio"], errors="coerce")
@@ -352,32 +276,8 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
         f"{len(focos_ciclo)} ({pct_focos:.1f}%)" if pd.notna(pct_focos) else f"{len(focos_ciclo)}"
     )
 
-    st.divider()
-
-    # Observaciones (se mantiene para la pestaña de vinculación, pero ya NO se muestra como columna en focos rojos)
-    oc_df, oc_fecha_col = _load_observaciones_df_from_secret()
-    oc_has_data = not oc_df.empty
-
-    if oc_has_data:
-        oc_prof_col = _pick_prof_col_oc(oc_df)
-        oc_car_col = _pick_carrera_col_oc(oc_df)
-        oc_link_col = _pick_link_col_oc(oc_df)
-        oc_res_col = _pick_result_col_oc(oc_df)
-
-        if oc_prof_col:
-            oc_df["_prof_key"] = oc_df[oc_prof_col].apply(_norm_key)
-        else:
-            oc_df["_prof_key"] = ""
-
-        if oc_car_col:
-            oc_df["_car_key"] = oc_df[oc_car_col].apply(_norm_key)
-        else:
-            oc_df["_car_key"] = ""
-    else:
-        oc_prof_col = oc_car_col = oc_link_col = oc_res_col = None
-
-    tabs = ["Resumen", "Tendencia", "Focos rojos", "Top docentes", "Vinculación con Observación"]
-    tab1, tabT, tab2, tabTop, tab3 = st.tabs(tabs)
+    tabs = ["Resumen", "Tendencia", "Focos rojos", "Top docentes"]
+    tab1, tabT, tab2, tabTop = st.tabs(tabs)
 
     # ---------------------------
     # Resumen
@@ -412,7 +312,6 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                     pd.to_numeric(dfx["total"], errors="coerce").sum(),
                 )
                 alerts = (pd.to_numeric(dfx["promedio"], errors="coerce") <= float(umbral)).sum()
-                # Carrera principal por peso "total" (si aplica) o por cantidad de grupos
                 dfx2 = dfx.copy()
                 dfx2["_total_num"] = pd.to_numeric(dfx2["total"], errors="coerce")
                 by_car = (
@@ -471,7 +370,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             st.dataframe(df_line.reset_index(drop=True), use_container_width=True)
 
     # ---------------------------
-    # Focos rojos (MEJORA: agrega carrera y elimina columna Observación)
+    # Focos rojos
     # ---------------------------
     with tab2:
         st.markdown("### Casos con promedio ≤ umbral — detalle (ciclo)")
@@ -481,15 +380,6 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             st.info("No hay focos rojos con el umbral seleccionado.")
         else:
             focos["Participación %"] = focos["participacion_pct"]
-
-            # (Interno) mantener cálculo de vinculación por si luego quieres reactivarlo, pero NO se muestra
-            focos["_obs_match"] = ""
-            if oc_has_data and oc_prof_col:
-                oc_sub = oc_df.copy()
-                if oc_car_col and carrera_key_sel:
-                    oc_sub = oc_sub[oc_sub["_car_key"] == carrera_key_sel]
-                oc_keys = set(oc_sub["_prof_key"].dropna().tolist())
-                focos["_obs_match"] = focos["_prof_key"].apply(lambda k: "Sí" if k in oc_keys else "No")
 
             show_cols = [
                 COL_CARRERA_OFICIAL,
@@ -503,7 +393,6 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             out = focos[show_cols].copy()
             out.rename(columns={COL_CARRERA_OFICIAL: "Carrera/Servicio"}, inplace=True)
 
-            # --- Orden de focos rojos ---
             c_ord1, c_ord2 = st.columns([1, 2])
             with c_ord1:
                 orden = st.selectbox("Orden", ["Menor a mayor", "Mayor a menor"], index=0)
@@ -521,7 +410,6 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                 .drop(columns=["_promedio_num", "_part_num"])
             )
 
-            # Wrap al final (ya ordenado)
             out["Carrera/Servicio"] = out["Carrera/Servicio"].apply(lambda x: _wrap_text(x, width=32, max_lines=2))
             out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
             out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
@@ -529,7 +417,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
     # ---------------------------
-    # Top docentes (MEJORA: agrega carrera principal)
+    # Top docentes
     # ---------------------------
     with tabTop:
         st.markdown("### Top docentes — ranking (ciclo)")
@@ -553,7 +441,6 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
 
             prom_w = _promedio_ponderado(dfx)
 
-            # Carrera principal (por peso "total"; fallback por número de registros)
             dfx2 = dfx.copy()
             dfx2["_total_num"] = pd.to_numeric(dfx2["total"], errors="coerce")
             by_car = (
@@ -583,66 +470,3 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             out["Carrera/Servicio"] = out["Carrera/Servicio"].apply(lambda x: _wrap_text(x, width=32, max_lines=2))
             out["Profesor"] = out["Profesor"].apply(lambda x: _wrap_text(x, width=50, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
-
-    # ---------------------------
-    # Vinculación con Observación
-    # ---------------------------
-    with tab3:
-        st.markdown("### Vinculación (Evaluación Docente → Observación de clases)")
-        if not oc_has_data:
-            st.warning("No pude cargar Observación de clases. Configura **OC_SHEET_URL** (y opcionalmente OC_SHEET_NAME) en Secrets.")
-            return
-        if not oc_prof_col:
-            st.warning("Cargué Observación, pero no pude detectar la columna del docente.")
-            return
-
-        profs = sorted(f["profesor"].dropna().astype(str).str.strip().unique().tolist())
-        if not profs:
-            st.info("No hay profesores para mostrar.")
-            return
-
-        prof_sel = st.selectbox("Profesor", profs, index=0)
-
-        ed_prof = f[f["profesor"].astype(str).str.strip() == str(prof_sel).strip()].copy()
-        st.caption(f"Registros en Evaluación Docente para este profesor (ciclo): {len(ed_prof)}")
-
-        ed_show = ed_prof[[COL_CARRERA_OFICIAL, "materia", "grupo", "promedio", "participacion_pct"]].copy()
-        ed_show.rename(columns={COL_CARRERA_OFICIAL: "Carrera/Servicio", "participacion_pct": "Participación %"}, inplace=True)
-        ed_show["Carrera/Servicio"] = ed_show["Carrera/Servicio"].apply(lambda x: _wrap_text(x, width=32, max_lines=2))
-        ed_show["materia"] = ed_show["materia"].apply(lambda x: _wrap_text(x, width=55, max_lines=2))
-        st.dataframe(ed_show.reset_index(drop=True), use_container_width=True)
-
-        oc_sub = oc_df[oc_df["_prof_key"] == _norm_key(prof_sel)].copy()
-        if oc_car_col and carrera_key_sel:
-            oc_sub = oc_sub[oc_sub["_car_key"] == carrera_key_sel]
-
-        if oc_sub.empty:
-            st.info("No se encontraron observaciones vinculadas para este profesor con los filtros actuales.")
-            return
-
-        st.markdown("#### Observaciones encontradas — tabla")
-        cols_to_show = []
-        if oc_fecha_col and oc_fecha_col in oc_sub.columns:
-            cols_to_show.append(oc_fecha_col)
-        cols_to_show.append(oc_prof_col)
-        if oc_car_col and oc_car_col in oc_sub.columns:
-            cols_to_show.append(oc_car_col)
-
-        oc_res_col2 = _pick_result_col_oc(oc_sub)
-        oc_link_col2 = _pick_link_col_oc(oc_sub)
-        if oc_res_col2 and oc_res_col2 in oc_sub.columns:
-            cols_to_show.append(oc_res_col2)
-        if oc_link_col2 and oc_link_col2 in oc_sub.columns:
-            cols_to_show.append(oc_link_col2)
-
-        out = oc_sub[cols_to_show].copy()
-        if oc_fecha_col and oc_fecha_col in out.columns:
-            out[oc_fecha_col] = pd.to_datetime(out[oc_fecha_col], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
-
-        out[oc_prof_col] = out[oc_prof_col].apply(lambda x: _wrap_text(x, width=40, max_lines=2))
-        if oc_car_col and oc_car_col in out.columns:
-            out[oc_car_col] = out[oc_car_col].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
-        if oc_link_col2 and oc_link_col2 in out.columns:
-            out[oc_link_col2] = out[oc_link_col2].astype(str).apply(lambda x: _wrap_text(x, width=55, max_lines=2))
-
-        st.dataframe(out.reset_index(drop=True), use_container_width=True)
