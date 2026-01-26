@@ -347,11 +347,14 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
     k1.metric("Promedio (ciclo)", f"{prom_global:.2f}" if pd.notna(prom_global) else "—")
     k2.metric("Participación", f"{part_global:.1f}%" if pd.notna(part_global) else "—")
     k3.metric("Grupos evaluados", f"{len(f)}")
-    k4.metric("Casos en alerta", f"{len(focos_ciclo)} ({pct_focos:.1f}%)" if pd.notna(pct_focos) else f"{len(focos_ciclo)}")
+    k4.metric(
+        "Casos en alerta",
+        f"{len(focos_ciclo)} ({pct_focos:.1f}%)" if pd.notna(pct_focos) else f"{len(focos_ciclo)}"
+    )
 
     st.divider()
 
-    # Observaciones (se mantiene, pero su “carrera” puede no venir normalizada como carrera_oficial)
+    # Observaciones (se mantiene para la pestaña de vinculación, pero ya NO se muestra como columna en focos rojos)
     oc_df, oc_fecha_col = _load_observaciones_df_from_secret()
     oc_has_data = not oc_df.empty
 
@@ -409,7 +412,22 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                     pd.to_numeric(dfx["total"], errors="coerce").sum(),
                 )
                 alerts = (pd.to_numeric(dfx["promedio"], errors="coerce") <= float(umbral)).sum()
+                # Carrera principal por peso "total" (si aplica) o por cantidad de grupos
+                dfx2 = dfx.copy()
+                dfx2["_total_num"] = pd.to_numeric(dfx2["total"], errors="coerce")
+                by_car = (
+                    dfx2.groupby(COL_CARRERA_OFICIAL, dropna=False)
+                    .agg(peso_total=("_total_num", "sum"), grupos=("grupo", "count"))
+                    .reset_index()
+                )
+                if not by_car.empty:
+                    by_car = by_car.sort_values(["peso_total", "grupos"], ascending=[False, False], na_position="last")
+                    carrera_principal = by_car.iloc[0][COL_CARRERA_OFICIAL]
+                else:
+                    carrera_principal = pd.NA
+
                 rows.append({
+                    "Carrera/Servicio": str(carrera_principal).strip() if pd.notna(carrera_principal) else "—",
                     "Profesor": prof,
                     "Promedio (ponderado)": prom_w,
                     "Participación %": float(part) if pd.notna(part) else pd.NA,
@@ -417,6 +435,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                     "Casos en alerta": int(alerts),
                 })
             out = pd.DataFrame(rows).sort_values("Promedio (ponderado)", ascending=False, na_position="last")
+            out["Carrera/Servicio"] = out["Carrera/Servicio"].apply(lambda x: _wrap_text(x, width=32, max_lines=2))
             out["Profesor"] = out["Profesor"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
@@ -452,7 +471,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             st.dataframe(df_line.reset_index(drop=True), use_container_width=True)
 
     # ---------------------------
-    # Focos rojos (CORREGIDO: orden + sangría)
+    # Focos rojos (MEJORA: agrega carrera y elimina columna Observación)
     # ---------------------------
     with tab2:
         st.markdown("### Casos con promedio ≤ umbral — detalle (ciclo)")
@@ -462,20 +481,27 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             st.info("No hay focos rojos con el umbral seleccionado.")
         else:
             focos["Participación %"] = focos["participacion_pct"]
-            focos["Observación encontrada"] = ""
 
+            # (Interno) mantener cálculo de vinculación por si luego quieres reactivarlo, pero NO se muestra
+            focos["_obs_match"] = ""
             if oc_has_data and oc_prof_col:
                 oc_sub = oc_df.copy()
-                # Intento de acotar observaciones por carrera (si la carrera en OC coincide ya normalizada)
                 if oc_car_col and carrera_key_sel:
                     oc_sub = oc_sub[oc_sub["_car_key"] == carrera_key_sel]
                 oc_keys = set(oc_sub["_prof_key"].dropna().tolist())
-                focos["Observación encontrada"] = focos["_prof_key"].apply(
-                    lambda k: "Sí" if k in oc_keys else "No"
-                )
+                focos["_obs_match"] = focos["_prof_key"].apply(lambda k: "Sí" if k in oc_keys else "No")
 
-            show_cols = ["profesor", "materia", "grupo", "promedio", "Participación %", "ciclo", "Observación encontrada"]
+            show_cols = [
+                COL_CARRERA_OFICIAL,
+                "profesor",
+                "materia",
+                "grupo",
+                "promedio",
+                "Participación %",
+                "ciclo",
+            ]
             out = focos[show_cols].copy()
+            out.rename(columns={COL_CARRERA_OFICIAL: "Carrera/Servicio"}, inplace=True)
 
             # --- Orden de focos rojos ---
             c_ord1, c_ord2 = st.columns([1, 2])
@@ -483,28 +509,27 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                 orden = st.selectbox("Orden", ["Menor a mayor", "Mayor a menor"], index=0)
             asc = (orden == "Menor a mayor")
 
-            # Asegurar tipos para ordenar bien
             out["_promedio_num"] = pd.to_numeric(out["promedio"], errors="coerce")
             out["_part_num"] = pd.to_numeric(out["Participación %"], errors="coerce")
 
-            # Orden primario: promedio; secundarios: participación y profesor (para desempates)
             out = (
                 out.sort_values(
-                    by=["_promedio_num", "_part_num", "profesor"],
-                    ascending=[asc, False, True],
+                    by=["_promedio_num", "_part_num", "Carrera/Servicio", "profesor"],
+                    ascending=[asc, False, True, True],
                     na_position="last",
                 )
                 .drop(columns=["_promedio_num", "_part_num"])
             )
 
             # Wrap al final (ya ordenado)
+            out["Carrera/Servicio"] = out["Carrera/Servicio"].apply(lambda x: _wrap_text(x, width=32, max_lines=2))
             out["profesor"] = out["profesor"].apply(lambda x: _wrap_text(x, width=35, max_lines=2))
             out["materia"] = out["materia"].apply(lambda x: _wrap_text(x, width=45, max_lines=2))
 
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
     # ---------------------------
-    # Top docentes
+    # Top docentes (MEJORA: agrega carrera principal)
     # ---------------------------
     with tabTop:
         st.markdown("### Top docentes — ranking (ciclo)")
@@ -525,8 +550,25 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
                 continue
             if pd.notna(part_prof) and float(part_prof) < float(min_part):
                 continue
+
             prom_w = _promedio_ponderado(dfx)
+
+            # Carrera principal (por peso "total"; fallback por número de registros)
+            dfx2 = dfx.copy()
+            dfx2["_total_num"] = pd.to_numeric(dfx2["total"], errors="coerce")
+            by_car = (
+                dfx2.groupby(COL_CARRERA_OFICIAL, dropna=False)
+                .agg(peso_total=("_total_num", "sum"), grupos=("grupo", "count"))
+                .reset_index()
+            )
+            if not by_car.empty:
+                by_car = by_car.sort_values(["peso_total", "grupos"], ascending=[False, False], na_position="last")
+                carrera_principal = by_car.iloc[0][COL_CARRERA_OFICIAL]
+            else:
+                carrera_principal = pd.NA
+
             rows.append({
+                "Carrera/Servicio": str(carrera_principal).strip() if pd.notna(carrera_principal) else "—",
                 "Profesor": prof,
                 "Promedio (ponderado)": prom_w,
                 "Participación %": float(part_prof) if pd.notna(part_prof) else pd.NA,
@@ -538,6 +580,7 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
             st.info("No hay docentes que cumplan los criterios mínimos con los filtros actuales.")
         else:
             out = out.sort_values("Promedio (ponderado)", ascending=False, na_position="last")
+            out["Carrera/Servicio"] = out["Carrera/Servicio"].apply(lambda x: _wrap_text(x, width=32, max_lines=2))
             out["Profesor"] = out["Profesor"].apply(lambda x: _wrap_text(x, width=50, max_lines=2))
             st.dataframe(out.reset_index(drop=True), use_container_width=True)
 
@@ -563,9 +606,10 @@ def render_evaluacion_docente(vista: str | None = None, carrera: str | None = No
         ed_prof = f[f["profesor"].astype(str).str.strip() == str(prof_sel).strip()].copy()
         st.caption(f"Registros en Evaluación Docente para este profesor (ciclo): {len(ed_prof)}")
 
-        ed_show = ed_prof[["materia", "grupo", "promedio", "participacion_pct"]].copy()
+        ed_show = ed_prof[[COL_CARRERA_OFICIAL, "materia", "grupo", "promedio", "participacion_pct"]].copy()
+        ed_show.rename(columns={COL_CARRERA_OFICIAL: "Carrera/Servicio", "participacion_pct": "Participación %"}, inplace=True)
+        ed_show["Carrera/Servicio"] = ed_show["Carrera/Servicio"].apply(lambda x: _wrap_text(x, width=32, max_lines=2))
         ed_show["materia"] = ed_show["materia"].apply(lambda x: _wrap_text(x, width=55, max_lines=2))
-        ed_show.rename(columns={"participacion_pct": "Participación %"}, inplace=True)
         st.dataframe(ed_show.reset_index(drop=True), use_container_width=True)
 
         oc_sub = oc_df[oc_df["_prof_key"] == _norm_key(prof_sel)].copy()
