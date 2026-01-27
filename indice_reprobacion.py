@@ -5,7 +5,6 @@ import gspread
 import re
 
 import bajas_retencion  # resumen de bajas
-from collections.abc import Mapping
 
 # =========================================
 # Config
@@ -71,7 +70,46 @@ def _user_can_see_bajas() -> bool:
     if bool(st.session_state.get("user_allow_all", False)):
         return True
     mods = st.session_state.get("user_modulos", set())
-    return "bajas_retencion" in set(mods)
+    try:
+        return "bajas_retencion" in set(mods)
+    except Exception:
+        return False
+
+
+def _ciclo_sort_key(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series.astype(str).str.strip(), errors="coerce")
+
+
+def _make_hist_line(df_hist: pd.DataFrame, titulo: str):
+    """
+    df_hist columnas esperadas:
+      - CICLO (str)
+      - REPROBADOS_UNICOS (int)
+    """
+    base = alt.Chart(df_hist)
+
+    line = base.mark_line(point=True).encode(
+        x=alt.X(
+            "CICLO:N",
+            title="Ciclo",
+            sort=None,
+            axis=alt.Axis(labelAngle=0, labelOverlap="greedy"),
+        ),
+        y=alt.Y("REPROBADOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
+        tooltip=[
+            alt.Tooltip("CICLO:N", title="Ciclo"),
+            alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos"),
+        ],
+    ).properties(height=360, title=titulo)
+
+    # Etiqueta numérica en cada punto (mejor lectura)
+    labels = base.mark_text(dy=-10).encode(
+        x=alt.X("CICLO:N", sort=None),
+        y=alt.Y("REPROBADOS_UNICOS:Q"),
+        text=alt.Text("REPROBADOS_UNICOS:Q"),
+    )
+
+    return (line + labels)
 
 
 # =========================================
@@ -79,8 +117,10 @@ def _user_can_see_bajas() -> bool:
 # =========================================
 @st.cache_data(show_spinner=False, ttl=300)
 def _load_reprobacion_from_gsheets(url: str, sheet_name: str | None = None) -> pd.DataFrame:
-    sa = dict(st.secrets["gcp_service_account_json"])
-    gc = gspread.service_account_from_dict(sa)
+    sa = st.secrets["gcp_service_account_json"]
+    sa_dict = dict(sa) if isinstance(sa, dict) else dict(sa)
+
+    gc = gspread.service_account_from_dict(sa_dict)
     sh = gc.open_by_url(url)
 
     ws = sh.worksheet(sheet_name) if sheet_name else sh.sheet1
@@ -115,17 +155,30 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     if not vista:
         vista = "Dirección General"
 
-    url = st.secrets.get("IR_URL", "").strip()
-    sheet_name = st.secrets.get("IR_SHEET_NAME", SHEET_NAME_DEFAULT).strip() or None
+    url = (st.secrets.get("IR_URL", "") or "").strip()
+    sheet_name = (st.secrets.get("IR_SHEET_NAME", SHEET_NAME_DEFAULT) or "").strip() or None
 
     if not url:
         st.error("Falta configurar IR_URL en Secrets.")
         return
 
-    df = _load_reprobacion_from_gsheets(url, sheet_name)
+    try:
+        df = _load_reprobacion_from_gsheets(url, sheet_name)
+    except Exception as e:
+        st.error("No se pudo cargar el Google Sheet de reprobación.")
+        st.exception(e)
+        return
+
     if df.empty:
         st.warning("La hoja de reprobación está vacía.")
         return
+
+    # Validar mínimas
+    for req in ["AREA", "CICLO"]:
+        if req not in df.columns:
+            st.error(f"Falta columna requerida: {req}")
+            st.caption(f"Columnas detectadas: {', '.join(df.columns)}")
+            return
 
     # Normalizaciones base
     for c in ["AREA", "MATERIA", "MATRICULA", "CICLO"]:
@@ -135,27 +188,14 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     if "CALIF_FINAL" in df.columns:
         df["CALIF_FINAL"] = _to_num(df["CALIF_FINAL"])
 
-    # === Catálogo desde Bajas (fuente única de verdad) ===
-    bajas_df = bajas_retencion.get_bajas_base_df()
-    cat = (
-        bajas_df[["AREA_ID", "AREA_OFICIAL"]]
-        .dropna()
-        .drop_duplicates()
-    )
-
     df["AREA_norm"] = df["AREA"].apply(normalizar_texto)
-    cat["AREA_norm"] = cat["AREA_OFICIAL"].apply(normalizar_texto)
-
-    df = df.merge(
-        cat[["AREA_ID", "AREA_norm"]],
-        on="AREA_norm",
-        how="left",
-    )
 
     # =========================
     # Filtros
     # =========================
     f = df.copy()
+    area_ctx = None
+    ciclo_sel = "(Todos)"
 
     if vista == "Director de carrera" and carrera:
         carrera_norm = normalizar_texto(carrera)
@@ -202,50 +242,96 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     if _user_can_see_bajas():
         with st.expander("📌 Resumen de bajas (contexto)", expanded=True):
             ciclo_int = _ciclo_to_int(ciclo_sel)
-            res = bajas_retencion.resumen_bajas_por_filtros(
-                ciclo=ciclo_int,
-                area=area_ctx,
-            )
-            st.metric("Bajas", f"{res.get('n', 0):,}")
-            if not res["top_motivos"].empty:
-                st.dataframe(res["top_motivos"], use_container_width=True)
+            try:
+                res = bajas_retencion.resumen_bajas_por_filtros(
+                    ciclo=ciclo_int,
+                    area=area_ctx,
+                )
+                st.metric("Bajas", f"{res.get('n', 0):,}")
+                top = res.get("top_motivos")
+                if top is not None and not top.empty:
+                    st.dataframe(top, use_container_width=True)
+                else:
+                    st.caption("Sin detalle de motivos para este filtro.")
+            except Exception as e:
+                st.error("No pude calcular el resumen de bajas.")
+                st.exception(e)
 
     st.divider()
 
     # =========================
     # KPIs
     # =========================
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Registros", len(f))
-    c2.metric("Alumnos únicos", f["MATRICULA"].nunique() if "MATRICULA" in f.columns else "—")
-    c3.metric(
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Registros", len(f))
+    k2.metric("Alumnos únicos", f["MATRICULA"].nunique() if "MATRICULA" in f.columns else "—")
+    k3.metric(
         "Promedio calificación",
         f"{f['CALIF_FINAL'].mean():.2f}" if "CALIF_FINAL" in f.columns else "—"
     )
 
+    st.divider()
+
     # =========================
-    # Comparativo por carrera
+    # ✅ GRÁFICA EN PICOS POR CICLO (LO QUE NECESITAS EN DC)
     # =========================
-    g = f.groupby("AREA")
+    st.markdown("## Histórico de reprobados por ciclo (picos)")
+
+    if "CICLO" not in f.columns or f["CICLO"].dropna().empty:
+        st.info("No se detectó una columna CICLO usable para construir el histórico.")
+    else:
+        base = f.copy()
+
+        if "MATRICULA" in base.columns:
+            hist = base.groupby("CICLO")["MATRICULA"].nunique().reset_index(name="REPROBADOS_UNICOS")
+        else:
+            hist = base.groupby("CICLO").size().reset_index(name="REPROBADOS_UNICOS")
+
+        hist["CICLO_NUM"] = _ciclo_sort_key(hist["CICLO"])
+        hist = hist.sort_values(["CICLO_NUM", "CICLO"]).drop(columns=["CICLO_NUM"])
+        hist["REPROBADOS_UNICOS"] = pd.to_numeric(hist["REPROBADOS_UNICOS"], errors="coerce").fillna(0).astype(int)
+
+        titulo = "Institucional (todas las carreras)" if (vista != "Director de carrera" and area_ctx is None) else f"{area_ctx or 'Carrera'}"
+
+        chart = _make_hist_line(hist, titulo=f"Reprobados (únicos) por ciclo — {titulo}")
+        st.altair_chart(chart, use_container_width=True)
+        st.dataframe(hist, use_container_width=True)
+
+    st.divider()
+
+    # =========================
+    # Comparativo por carrera (tabla + barras SOLO si hay varias áreas)
+    # =========================
+    st.markdown("## Comparativo por carrera")
+
+    g = f.groupby("AREA", dropna=False)
 
     resumen = pd.DataFrame({
-        "AREA": g.size().index,
+        "AREA": g.size().index.astype(str),
         "REPROBADOS": g.size().values,
         "ALUMNOS_UNICOS": g["MATRICULA"].nunique().values if "MATRICULA" in f.columns else g.size().values,
         "PROM_CALIF": g["CALIF_FINAL"].mean().values if "CALIF_FINAL" in f.columns else pd.NA,
-    }).sort_values("ALUMNOS_UNICOS", ascending=False)
+    }).sort_values("ALUMNOS_UNICOS", ascending=False).reset_index(drop=True)
 
-    st.markdown("## Comparativo por carrera")
     st.dataframe(resumen, use_container_width=True)
 
-    chart = (
-        alt.Chart(resumen.reset_index(drop=True))
-        .mark_bar()
-        .encode(
-            y=alt.Y("AREA:N", sort="-x"),
-            x=alt.X("ALUMNOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
-            tooltip=["AREA", "REPROBADOS", "ALUMNOS_UNICOS", alt.Tooltip("PROM_CALIF", format=".2f")],
+    # ✅ Evita la barra “gigante” cuando solo hay 1 carrera (tu screenshot)
+    if len(resumen) >= 2:
+        chart_bar = (
+            alt.Chart(resumen)
+            .mark_bar()
+            .encode(
+                y=alt.Y("AREA:N", sort="-x", title=None),
+                x=alt.X("ALUMNOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
+                tooltip=[
+                    alt.Tooltip("AREA:N", title="Área"),
+                    alt.Tooltip("REPROBADOS:Q", title="Registros"),
+                    alt.Tooltip("ALUMNOS_UNICOS:Q", title="Únicos"),
+                    alt.Tooltip("PROM_CALIF:Q", title="Prom. calif", format=".2f"),
+                ],
+            )
+            .properties(height=max(280, min(900, 24 * len(resumen))))
         )
-        .properties(height=max(300, 24 * len(resumen)))
-    )
-    st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart_bar, use_container_width=True)
+    else:
+        st.caption("En este filtro solo hay **1 carrera**, por eso el comparativo en barras no aporta; el histórico por ciclo es el foco.")
