@@ -103,10 +103,6 @@ def _clean_upper(x: str) -> str:
     return s.upper()
 
 def _split_motivo(x: str):
-    """
-    Espera: CATEGORIA - detalle
-    Si no hay '-', la categoría será el texto y el detalle vacío.
-    """
     s = (x or "").strip()
     if not s:
         return ("", "")
@@ -116,10 +112,6 @@ def _split_motivo(x: str):
     return (cat, det)
 
 def _std_categoria(cat_raw: str) -> str:
-    """
-    Homologación mínima (puedes ajustar después).
-    La idea: reducir variabilidad de escritura para dashboard.
-    """
     c = _clean_upper(cat_raw)
 
     rules = [
@@ -143,21 +135,16 @@ def _to_int_safe(x):
         return pd.NA
 
 def _parse_fecha(x: str):
-    """
-    Soporta formatos tipo: 25-jul-19, 3-dic-19, 2019-07-25, etc.
-    """
     s = str(x or "").strip()
     if not s:
         return pd.NaT
     s = s.replace("\u00A0", " ")
     s = re.sub(r"\s+", " ", s)
 
-    # Intento 1: parse libre
     dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
     if pd.notna(dt):
         return dt
 
-    # Intento 2: normalizar meses en español (abreviados comunes)
     meses = {
         "ene": "jan", "feb": "feb", "mar": "mar", "abr": "apr", "may": "may", "jun": "jun",
         "jul": "jul", "ago": "aug", "sep": "sep", "oct": "oct", "nov": "nov", "dic": "dec"
@@ -174,32 +161,35 @@ def _parse_fecha(x: str):
 # ---------------- Render ----------------
 def render_bajas_retencion(vista: str, carrera: str | None):
     st.subheader("Bajas / Retención")
+    st.caption("Vista analítica (solo lectura).")
 
     # 1) Carga
     try:
-        df = _load_bajas_df()
+        df0 = _load_bajas_df()
     except Exception as e:
         st.error("No pude cargar la información de Bajas. Revisa URL, permisos o nombre de pestaña.")
         st.exception(e)
         return
 
-    if df.empty:
+    if df0.empty:
         st.warning("La pestaña está vacía o no tiene datos.")
         return
 
     # 2) Columnas esperadas (defensivo)
-    col_ciclo = "CICLO" if "CICLO" in df.columns else None
-    col_area = "AREA" if "AREA" in df.columns else None
-    col_grupo = "GRUPO" if "GRUPO" in df.columns else None
-    col_fecha = "FECHA_BAJA" if "FECHA_BAJA" in df.columns else None
-    col_motivo = "MOTIVO_BAJA" if "MOTIVO_BAJA" in df.columns else None
+    col_ciclo = "CICLO" if "CICLO" in df0.columns else None
+    col_area = "AREA" if "AREA" in df0.columns else None
+    col_grupo = "GRUPO" if "GRUPO" in df0.columns else None
+    col_fecha = "FECHA_BAJA" if "FECHA_BAJA" in df0.columns else None
+    col_motivo = "MOTIVO_BAJA" if "MOTIVO_BAJA" in df0.columns else None
 
     if not col_motivo:
         st.error("No encontré la columna MOTIVO_BAJA en esta pestaña.")
-        st.write("Columnas detectadas:", list(df.columns))
+        st.write("Columnas detectadas:", list(df0.columns))
         return
 
     # 3) Normalización base
+    df = df0.copy()
+
     if col_area:
         df[col_area] = df[col_area].apply(_clean_upper)
 
@@ -211,69 +201,82 @@ def render_bajas_retencion(vista: str, carrera: str | None):
 
     if col_fecha:
         df["FECHA_BAJA_DT"] = df[col_fecha].apply(_parse_fecha)
-        df["ANIO"] = df["FECHA_BAJA_DT"].dt.year
         df["MES"] = df["FECHA_BAJA_DT"].dt.to_period("M").astype(str)
     else:
         df["FECHA_BAJA_DT"] = pd.NaT
-        df["ANIO"] = pd.NA
         df["MES"] = ""
 
-    # 4) Filtros (sidebar)
-    st.sidebar.markdown("## Filtros — Bajas")
+    # 4) Filtros ARRIBA (no sidebar)
+    st.markdown("### Filtros")
 
-    # Filtro por área: DG elige; DC se fuerza por carrera (si viene)
+    # Opciones base (antes de filtrar)
+    areas = []
     if col_area:
         areas = sorted([a for a in df[col_area].dropna().unique().tolist() if str(a).strip()])
-    else:
-        areas = []
 
-    if carrera and col_area:
-        df = df[df[col_area] == str(carrera).upper()].copy()
-        st.sidebar.info(f"Área fija (DC): {str(carrera).upper()}")
-        area_sel = str(carrera).upper()
-    else:
-        area_sel = None
-        if col_area and areas:
-            area_sel = st.sidebar.selectbox("Área", options=["(Todas)"] + areas, index=0)
-            if area_sel != "(Todas)":
-                df = df[df[col_area] == area_sel].copy()
-
-    # Ciclo
+    ciclos = []
     if col_ciclo:
         ciclos = sorted([c for c in df[col_ciclo].dropna().unique().tolist() if pd.notna(c)])
-        ciclo_sel = st.sidebar.selectbox("Ciclo", options=["(Todos)"] + ciclos, index=0)
-        if ciclo_sel != "(Todos)":
-            df = df[df[col_ciclo] == ciclo_sel].copy()
-    else:
-        ciclo_sel = None
 
-    # Grupo
-    if col_grupo and not df.empty:
+    grupos = []
+    if col_grupo:
         grupos = sorted([g for g in df[col_grupo].dropna().unique().tolist() if str(g).strip()])
-        grupo_sel = st.sidebar.selectbox("Grupo", options=["(Todos)"] + grupos, index=0)
-        if grupo_sel != "(Todos)":
-            df = df[df[col_grupo] == grupo_sel].copy()
-    else:
-        grupo_sel = None
 
-    # Categoría motivo
     cats = sorted(df["MOTIVO_CATEGORIA_STD"].dropna().unique().tolist())
-    cat_sel = st.sidebar.selectbox("Motivo (categoría)", options=["(Todos)"] + cats, index=0)
+
+    # Layout de filtros
+    # DC: área fija por carrera
+    if carrera and col_area:
+        cA, cC, cG, cM = st.columns([2.2, 1.2, 1.2, 1.8])
+        with cA:
+            st.text_input("Área", value=str(carrera).upper(), disabled=True)
+            area_sel = str(carrera).upper()
+        with cC:
+            ciclo_sel = st.selectbox("Ciclo", options=["(Todos)"] + ciclos, index=0)
+        with cG:
+            grupo_sel = st.selectbox("Grupo", options=["(Todos)"] + grupos, index=0)
+        with cM:
+            cat_sel = st.selectbox("Motivo (categoría)", options=["(Todos)"] + cats, index=0)
+    else:
+        cA, cC, cG, cM = st.columns([2.2, 1.2, 1.2, 1.8])
+        with cA:
+            area_sel = st.selectbox("Área", options=["(Todas)"] + areas, index=0) if col_area else "(Todas)"
+        with cC:
+            ciclo_sel = st.selectbox("Ciclo", options=["(Todos)"] + ciclos, index=0) if col_ciclo else "(Todos)"
+        with cG:
+            grupo_sel = st.selectbox("Grupo", options=["(Todos)"] + grupos, index=0) if col_grupo else "(Todos)"
+        with cM:
+            cat_sel = st.selectbox("Motivo (categoría)", options=["(Todos)"] + cats, index=0)
+
+    # Aplicar filtros
+    if col_area and carrera:
+        df = df[df[col_area] == str(carrera).upper()].copy()
+    elif col_area and area_sel != "(Todas)":
+        df = df[df[col_area] == area_sel].copy()
+
+    if col_ciclo and ciclo_sel != "(Todos)":
+        df = df[df[col_ciclo] == ciclo_sel].copy()
+
+    if col_grupo and grupo_sel != "(Todos)":
+        df = df[df[col_grupo] == grupo_sel].copy()
+
     if cat_sel != "(Todos)":
         df = df[df["MOTIVO_CATEGORIA_STD"] == cat_sel].copy()
 
+    st.divider()
+
     # 5) KPIs
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
         st.metric("Bajas (filtrado)", f"{len(df):,}")
-    with c2:
+    with k2:
         st.metric("Motivos únicos", f"{df['MOTIVO_CATEGORIA_STD'].nunique():,}")
-    with c3:
+    with k3:
         st.metric("Grupos con bajas", f"{df[col_grupo].nunique():,}" if col_grupo else "—")
-    with c4:
+    with k4:
         st.metric("Áreas presentes", f"{df[col_area].nunique():,}" if col_area else "—")
 
-    # 6) Tendencia (por mes si hay fecha; si no, por ciclo)
+    # 6) Tendencia
     st.markdown("### Tendencia")
     if df["FECHA_BAJA_DT"].notna().any():
         ts = (
@@ -283,10 +286,10 @@ def render_bajas_retencion(vista: str, carrera: str | None):
               .reset_index(name="bajas")
               .sort_values("MES")
         )
-        chart = (
-            alt.Chart(ts)
-            .mark_line(point=True)
-            .encode(x="MES:N", y="bajas:Q", tooltip=["MES:N", "bajas:Q"])
+        chart = alt.Chart(ts).mark_line(point=True).encode(
+            x=alt.X("MES:N", title="Mes"),
+            y=alt.Y("bajas:Q", title="Bajas"),
+            tooltip=["MES:N", "bajas:Q"],
         )
         st.altair_chart(chart, use_container_width=True)
     elif col_ciclo and df[col_ciclo].notna().any():
@@ -297,39 +300,41 @@ def render_bajas_retencion(vista: str, carrera: str | None):
               .reset_index(name="bajas")
               .sort_values(col_ciclo)
         )
-        chart = (
-            alt.Chart(ts)
-            .mark_line(point=True)
-            .encode(x=f"{col_ciclo}:O", y="bajas:Q", tooltip=[f"{col_ciclo}:O", "bajas:Q"])
+        chart = alt.Chart(ts).mark_line(point=True).encode(
+            x=alt.X(f"{col_ciclo}:O", title="Ciclo"),
+            y=alt.Y("bajas:Q", title="Bajas"),
+            tooltip=[alt.Tooltip(f"{col_ciclo}:O", title="Ciclo"), "bajas:Q"],
         )
         st.altair_chart(chart, use_container_width=True)
     else:
         st.info("No hay FECHA_BAJA o CICLO usable para tendencia.")
 
-    # 7) Pareto de motivos (categoría)
-    st.markdown("### Pareto de motivos (categoría homologada)")
+    # 7) Pareto de motivos
+    st.markdown("### Motivos de baja (categoría homologada)")
     vc = df["MOTIVO_CATEGORIA_STD"].value_counts().reset_index()
     vc.columns = ["motivo", "bajas"]
-    if not vc.empty:
-        vc["%"] = (vc["bajas"] / vc["bajas"].sum()) * 100
-        vc["%_acum"] = vc["%"].cumsum()
+    if vc.empty:
+        st.info("No hay datos para mostrar con el filtro actual.")
+        return
 
-        st.dataframe(vc, use_container_width=True)
+    vc["%"] = (vc["bajas"] / vc["bajas"].sum()) * 100
+    vc["%_acum"] = vc["%"].cumsum()
 
-        pareto = alt.Chart(vc).mark_bar().encode(
-            x=alt.X("motivo:N", sort="-y", title="Motivo"),
-            y=alt.Y("bajas:Q", title="Bajas"),
-            tooltip=["motivo:N", "bajas:Q", alt.Tooltip("%:Q", format=".1f"), alt.Tooltip("%_acum:Q", format=".1f")]
-        )
-        st.altair_chart(pareto, use_container_width=True)
+    st.dataframe(vc, use_container_width=True)
 
-    # 8) Top grupos y resumen por área/ciclo
-    if col_grupo:
-        st.markdown("### Top grupos con más bajas")
-        top_g = df[col_grupo].value_counts().head(20).rename("bajas").reset_index()
-        top_g.columns = ["grupo", "bajas"]
-        st.dataframe(top_g, use_container_width=True)
+    pareto = alt.Chart(vc).mark_bar().encode(
+        x=alt.X("motivo:N", sort="-y", title="Motivo"),
+        y=alt.Y("bajas:Q", title="Bajas"),
+        tooltip=[
+            alt.Tooltip("motivo:N", title="Motivo"),
+            alt.Tooltip("bajas:Q", title="Bajas"),
+            alt.Tooltip("%:Q", title="%", format=".1f"),
+            alt.Tooltip("%_acum:Q", title="% acumulado", format=".1f"),
+        ],
+    )
+    st.altair_chart(pareto, use_container_width=True)
 
+    # 8) Resumen ciclo–área (útil para DG)
     if col_ciclo and col_area:
         st.markdown("### Resumen por ciclo y área")
         resumen = (
@@ -340,7 +345,7 @@ def render_bajas_retencion(vista: str, carrera: str | None):
         )
         st.dataframe(resumen, use_container_width=True)
 
-    # 9) “OTROS” -> detalles más repetidos (para depurar categoría)
+    # 9) Depuración “OTROS”
     st.markdown("### Depuración: detalles más repetidos (solo OTROS)")
     otros = df[df["MOTIVO_CATEGORIA_STD"] == "OTROS"].copy()
     if not otros.empty:
@@ -353,7 +358,7 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     else:
         st.caption("No hay registros OTROS en el filtro actual.")
 
-    # 10) Tabla de casos (detalle)
+    # 10) Tabla de casos
     st.markdown("### Casos (detalle)")
     cols = [c for c in [
         "CICLO", "CICLO INGRESO", "TIPO", "NIVEL", "AREA", "GRUPO", "ALUMNO",
@@ -361,7 +366,7 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     ] if c in df.columns]
     st.dataframe(df[cols] if cols else df, use_container_width=True, height=520)
 
-    # 11) Catálogo de homologación visible (para ajustar)
-    with st.expander("🔧 Cómo se está homologando MOTIVO_CATEGORIA (referencia)"):
-        st.write("Se toma el texto antes del '-' como categoría RAW y se mapea a una categoría STD.")
-        st.write("Si ves categorías mal agrupadas, me dices cuáles y ajusto las reglas en `_std_categoria()`.")
+    # 11) Reglas de homologación (para ajustes finos)
+    with st.expander("🔧 Reglas actuales de homologación (MOTIVO_CATEGORIA_STD)"):
+        st.write("Se toma el texto antes del '-' como categoría RAW y se mapea a una categoría homologada.")
+        st.write("Si detectas que algo quedó mal agrupado, me dices el texto exacto y ajusto `_std_categoria()`.")
