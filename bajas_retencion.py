@@ -355,3 +355,65 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     with st.expander("🔧 Reglas actuales de homologación (MOTIVO_CATEGORIA_STD)"):
         st.write("Se toma el texto antes del '-' como categoría RAW y se mapea a una categoría homologada.")
         st.write("Si detectas que algo quedó mal agrupado, me dices el texto exacto y ajusto `_std_categoria()`.")
+
+# =========================================================
+# ✅ Helpers para integración con otros módulos (reprobación, etc.)
+# =========================================================
+def get_bajas_base_df() -> pd.DataFrame:
+    """
+    Devuelve el DF de bajas ya normalizado, listo para reutilizar:
+      - AREA en upper
+      - CICLO a int si aplica
+      - MOTIVO_CATEGORIA_STD
+    """
+    df0 = _load_bajas_df()
+    if df0 is None or df0.empty:
+        return pd.DataFrame()
+
+    df = df0.copy()
+
+    # AREA
+    if "AREA" in df.columns:
+        df["AREA"] = df["AREA"].apply(_clean_upper)
+
+    # CICLO
+    if "CICLO" in df.columns:
+        df["CICLO"] = df["CICLO"].apply(_to_int_safe)
+
+    # MOTIVO
+    if "MOTIVO_BAJA" in df.columns:
+        df["MOTIVO_CATEGORIA_RAW"], df["MOTIVO_DETALLE"] = zip(*df["MOTIVO_BAJA"].apply(_split_motivo))
+        df["MOTIVO_CATEGORIA_STD"] = df["MOTIVO_CATEGORIA_RAW"].apply(_std_categoria)
+    else:
+        df["MOTIVO_CATEGORIA_STD"] = "SIN ESPECIFICAR"
+
+    return df
+
+
+def resumen_bajas_por_filtros(ciclo: int | None, area: str | None) -> dict:
+    """
+    Retorna métricas rápidas (para embedding en otros módulos):
+      - total: int
+      - top_motivos: DataFrame (motivo, bajas) top 3
+    """
+    df = get_bajas_base_df()
+    if df.empty:
+        return {"total": 0, "top_motivos": pd.DataFrame(columns=["motivo", "bajas"])}
+
+    if ciclo is not None and "CICLO" in df.columns:
+        df = df[df["CICLO"] == ciclo].copy()
+
+    if area and "AREA" in df.columns:
+        df = df[df["AREA"] == str(area).upper()].copy()
+
+    total = int(len(df))
+
+    top = (
+        df["MOTIVO_CATEGORIA_STD"]
+        .value_counts()
+        .head(3)
+        .reset_index()
+    )
+    top.columns = ["motivo", "bajas"]
+
+    return {"total": total, "top_motivos": top}
