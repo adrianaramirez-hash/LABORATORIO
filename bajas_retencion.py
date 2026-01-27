@@ -11,16 +11,16 @@ from google.oauth2.service_account import Credentials
 # Config (desde Secrets)
 # ============================================================
 # Secrets esperados:
-#   BAJAS_URL = "https://docs.google.com/spreadsheets/d/....../edit"
-#   BAJAS_SHEET_NAME = "BAJAS"
-#   CATALOGO_CARRERAS_URL = "https://docs.google.com/spreadsheets/d/....../edit"
-#   CATALOGO_CARRERAS_SHEET = "CATALOGO"
+#   BAJAS_URL
+#   BAJAS_SHEET_NAME
+#   CATALOGO_CARRERAS_URL
+#   CATALOGO_CARRERAS_SHEET
 
 BAJAS_SHEET_URL = (st.secrets.get("BAJAS_URL", "") or "").strip()
 BAJAS_TAB_NAME = (st.secrets.get("BAJAS_SHEET_NAME", "BAJAS") or "BAJAS").strip()
 
 CATALOGO_URL = (st.secrets.get("CATALOGO_CARRERAS_URL", "") or "").strip()
-CATALOGO_SHEET = (st.secrets.get("CATALOGO_CARRERAS_SHEET", "CATALOGO") or "CATALOGO").strip()
+CATALOGO_SHEET = (st.secrets.get("CATALOGO_CARRERAS_SHEET", "CAT_CARRERAS") or "CAT_CARRERAS").strip()
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -36,6 +36,7 @@ def _extract_sheet_id(url: str) -> str:
         raise ValueError("No pude extraer el ID del Google Sheet desde la URL.")
     return m.group(1)
 
+
 def _load_creds_dict() -> dict:
     raw = st.secrets["gcp_service_account_json"]
     if isinstance(raw, Mapping):
@@ -44,13 +45,17 @@ def _load_creds_dict() -> dict:
         return json.loads(raw)
     return dict(raw)
 
+
 @st.cache_resource(show_spinner=False)
 def _get_gspread_client():
     creds_dict = _load_creds_dict()
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
+
 def _load_ws_df(url: str, sheet_name: str) -> pd.DataFrame:
+    if not url:
+        raise ValueError("URL de Google Sheet no configurada.")
     gc = _get_gspread_client()
     sh = gc.open_by_key(_extract_sheet_id(url))
     ws = sh.worksheet(sheet_name)
@@ -62,7 +67,7 @@ def _load_ws_df(url: str, sheet_name: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
 
 # ============================================================
-# Normalización texto
+# Normalización de texto
 # ============================================================
 def normalizar_texto(valor) -> str:
     if pd.isna(valor):
@@ -85,11 +90,13 @@ def normalizar_texto(valor) -> str:
 # ============================================================
 # Catálogo maestro de carreras
 # ============================================================
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def _load_catalogo_carreras():
     if not CATALOGO_URL:
         raise ValueError("Falta configurar CATALOGO_CARRERAS_URL en Secrets.")
+
     df = _load_ws_df(CATALOGO_URL, CATALOGO_SHEET)
+    df.columns = [c.strip() for c in df.columns]
 
     required = {"carrera_id", "nombre_oficial", "variantes"}
     if not required.issubset(df.columns):
@@ -112,7 +119,7 @@ def _load_catalogo_carreras():
     return var_to_id, id_to_nombre
 
 # ============================================================
-# Carga base BAJAS
+# Base BAJAS normalizada y enriquecida
 # ============================================================
 @st.cache_data(ttl=300, show_spinner=False)
 def get_bajas_base_df() -> pd.DataFrame:
@@ -122,14 +129,17 @@ def get_bajas_base_df() -> pd.DataFrame:
 
     df.columns = [c.strip().upper() for c in df.columns]
 
+    # AREA
     if "AREA" in df.columns:
         df["AREA_norm"] = df["AREA"].apply(normalizar_texto)
     else:
         df["AREA_norm"] = ""
 
+    # CICLO
     if "CICLO" in df.columns:
         df["CICLO"] = pd.to_numeric(df["CICLO"], errors="coerce")
 
+    # FECHA
     if "FECHA_BAJA" in df.columns:
         df["FECHA_BAJA_DT"] = pd.to_datetime(df["FECHA_BAJA"], errors="coerce", dayfirst=True)
         df["MES"] = df["FECHA_BAJA_DT"].dt.to_period("M").astype(str)
@@ -137,19 +147,24 @@ def get_bajas_base_df() -> pd.DataFrame:
         df["FECHA_BAJA_DT"] = pd.NaT
         df["MES"] = ""
 
+    # MOTIVO
     if "MOTIVO_BAJA" in df.columns:
         def split_motivo(x):
-            s = str(x or "")
+            if pd.isna(x):
+                return "", ""
+            s = str(x).strip()
+            if not s:
+                return "", ""
             p = s.split("-", 1)
             return p[0].strip().upper(), p[1].strip() if len(p) > 1 else ""
+
         df["MOTIVO_RAW"], df["MOTIVO_DETALLE"] = zip(*df["MOTIVO_BAJA"].apply(split_motivo))
     else:
         df["MOTIVO_RAW"] = ""
         df["MOTIVO_DETALLE"] = ""
 
-    # Categoría homologada
     def std_cat(x):
-        x = x or ""
+        x = str(x or "")
         if "ECON" in x:
             return "ECONÓMICO"
         if "CAMBIO" in x:
@@ -160,15 +175,15 @@ def get_bajas_base_df() -> pd.DataFrame:
             return "BAJA ADMINISTRATIVA"
         if "ADMISI" in x or "ENTREV" in x:
             return "ADMISIÓN / INGRESO"
-        if "OTRO" in x:
-            return "OTROS"
         if "PERSONAL" in x:
             return "MOTIVOS PERSONALES"
+        if "OTRO" in x:
+            return "OTROS"
         return "SIN ESPECIFICAR"
 
     df["MOTIVO_CATEGORIA_STD"] = df["MOTIVO_RAW"].apply(std_cat)
 
-    # === Enriquecimiento con catálogo ===
+    # === Enriquecimiento con catálogo maestro ===
     var_to_id, id_to_nombre = _load_catalogo_carreras()
     df["AREA_ID"] = df["AREA_norm"].map(var_to_id)
     df["AREA_OFICIAL"] = df["AREA_ID"].map(id_to_nombre)
@@ -176,7 +191,7 @@ def get_bajas_base_df() -> pd.DataFrame:
     return df
 
 # ============================================================
-# API para otros módulos (Reprobación)
+# API para otros módulos (Índice de Reprobación)
 # ============================================================
 def resumen_bajas_por_filtros(ciclo: int | None = None, area: str | None = None) -> dict:
     df = get_bajas_base_df()
@@ -219,9 +234,6 @@ def render_bajas_retencion(vista: str, carrera: str | None):
         st.warning("No hay datos de bajas.")
         return
 
-    # ============================
-    # Filtros
-    # ============================
     st.markdown("### Filtros")
 
     carrera_norm = normalizar_texto(carrera) if vista == "Director de carrera" and carrera else None
