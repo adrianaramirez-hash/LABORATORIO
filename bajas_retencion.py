@@ -66,6 +66,7 @@ def _load_ws_df(url: str, sheet_name: str) -> pd.DataFrame:
     rows = values[1:]
     return pd.DataFrame(rows, columns=headers).replace("", pd.NA)
 
+
 # ============================================================
 # Normalización de texto
 # ============================================================
@@ -86,6 +87,7 @@ def normalizar_texto(valor) -> str:
     s = re.sub(r"[^a-z0-9 ]+", "", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 # ============================================================
 # Catálogo maestro de carreras (primero session_state, luego Secrets)
@@ -133,6 +135,7 @@ def _get_catalog_maps():
     # 2) fallback a Secrets
     return _load_catalogo_carreras_from_secrets()
 
+
 # ============================================================
 # Base BAJAS normalizada y enriquecida
 # ============================================================
@@ -165,7 +168,7 @@ def get_bajas_base_df() -> pd.DataFrame:
         df["FECHA_BAJA_DT"] = pd.NaT
         df["MES"] = ""
 
-    # MOTIVO (fix de pd.NA)
+    # MOTIVO (fix pd.NA)
     if "MOTIVO_BAJA" in df.columns:
         def split_motivo(x):
             if pd.isna(x):
@@ -208,6 +211,7 @@ def get_bajas_base_df() -> pd.DataFrame:
 
     return df
 
+
 # ============================================================
 # API para otros módulos (Índice de Reprobación)
 # ============================================================
@@ -234,6 +238,7 @@ def resumen_bajas_por_filtros(ciclo: int | None = None, area: str | None = None)
     )
 
     return {"ok": True, "n": len(x), "top_motivos": top}
+
 
 # ============================================================
 # Render principal
@@ -276,8 +281,120 @@ def render_bajas_retencion(vista: str, carrera: str | None):
 
     st.metric("Bajas", len(f))
 
-    st.markdown("### Motivos")
-    st.dataframe(
-        f["MOTIVO_CATEGORIA_STD"].value_counts().reset_index(),
-        use_container_width=True
+    # ============================================================
+    # ✅ Gráfica 1: Histórico total (línea)
+    # ============================================================
+    st.markdown("### Histórico total de bajas")
+
+    use_mes = ("FECHA_BAJA_DT" in f.columns) and f["FECHA_BAJA_DT"].notna().any()
+
+    if use_mes:
+        ts_total = (
+            f.dropna(subset=["FECHA_BAJA_DT"])
+            .groupby("MES")
+            .size()
+            .reset_index(name="bajas")
+            .sort_values("MES")
+        )
+        chart_total = (
+            alt.Chart(ts_total)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("MES:N", title="Mes"),
+                y=alt.Y("bajas:Q", title="Bajas"),
+                tooltip=[alt.Tooltip("MES:N", title="Mes"), alt.Tooltip("bajas:Q", title="Bajas")],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart_total, use_container_width=True)
+
+    elif "CICLO" in f.columns and f["CICLO"].notna().any():
+        ts_total = (
+            f.dropna(subset=["CICLO"])
+            .groupby("CICLO")
+            .size()
+            .reset_index(name="bajas")
+        )
+        ts_total["CICLO_NUM"] = pd.to_numeric(ts_total["CICLO"], errors="coerce")
+        ts_total = ts_total.sort_values(["CICLO_NUM", "CICLO"]).drop(columns=["CICLO_NUM"])
+
+        chart_total = (
+            alt.Chart(ts_total)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("CICLO:O", title="Ciclo"),
+                y=alt.Y("bajas:Q", title="Bajas"),
+                tooltip=[alt.Tooltip("CICLO:O", title="Ciclo"), alt.Tooltip("bajas:Q", title="Bajas")],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart_total, use_container_width=True)
+    else:
+        st.info("No hay FECHA_BAJA o CICLO usable para construir el histórico total.")
+
+    st.divider()
+
+    # ============================================================
+    # ✅ Gráfica 2: Histórico por motivo (stack)
+    # ============================================================
+    st.markdown("### Histórico de bajas por motivo (apilado)")
+
+    if "MOTIVO_CATEGORIA_STD" not in f.columns:
+        st.info("No se detectó la columna MOTIVO_CATEGORIA_STD para construir el histórico por motivo.")
+    else:
+        xcol = "MES" if use_mes else ("CICLO" if ("CICLO" in f.columns and f["CICLO"].notna().any()) else None)
+
+        if not xcol:
+            st.info("No hay eje temporal usable (MES o CICLO) para el histórico por motivo.")
+        else:
+            fx = f.copy()
+            fx["MOTIVO_CATEGORIA_STD"] = fx["MOTIVO_CATEGORIA_STD"].fillna("SIN ESPECIFICAR").astype(str)
+
+            ts_stack = (
+                fx.groupby([xcol, "MOTIVO_CATEGORIA_STD"])
+                .size()
+                .reset_index(name="bajas")
+            )
+
+            # orden temporal
+            if xcol == "CICLO":
+                ts_stack["CICLO_NUM"] = pd.to_numeric(ts_stack["CICLO"], errors="coerce")
+                ts_stack = ts_stack.sort_values(["CICLO_NUM", "CICLO", "MOTIVO_CATEGORIA_STD"]).drop(columns=["CICLO_NUM"])
+                x_enc = alt.X("CICLO:O", title="Ciclo")
+            else:
+                ts_stack = ts_stack.sort_values([xcol, "MOTIVO_CATEGORIA_STD"])
+                x_enc = alt.X("MES:N", title="Mes")
+
+            chart_stack = (
+                alt.Chart(ts_stack)
+                .mark_bar()
+                .encode(
+                    x=x_enc,
+                    y=alt.Y("bajas:Q", title="Bajas"),
+                    color=alt.Color("MOTIVO_CATEGORIA_STD:N", title="Motivo"),
+                    tooltip=[
+                        alt.Tooltip(f"{xcol}:N", title=("Mes" if xcol == "MES" else "Ciclo")),
+                        alt.Tooltip("MOTIVO_CATEGORIA_STD:N", title="Motivo"),
+                        alt.Tooltip("bajas:Q", title="Bajas"),
+                    ],
+                )
+                .properties(height=360)
+            )
+            st.altair_chart(chart_stack, use_container_width=True)
+
+    st.divider()
+
+    # ============================================================
+    # Tabla de conteo de motivos
+    # ============================================================
+    st.markdown("### Motivos (conteo)")
+
+    vc = (
+        f["MOTIVO_CATEGORIA_STD"]
+        .fillna("SIN ESPECIFICAR")
+        .astype(str)
+        .value_counts()
+        .reset_index()
     )
+    vc.columns = ["Motivo", "Bajas"]
+    st.dataframe(vc, use_container_width=True)
