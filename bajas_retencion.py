@@ -10,7 +10,7 @@ from google.oauth2.service_account import Credentials
 # ============================================================
 # Config (desde Secrets)
 # ============================================================
-# Secrets esperados:
+# Secrets esperados (opcionales si app.py ya inyecta df_cat_carreras):
 #   BAJAS_URL
 #   BAJAS_SHEET_NAME
 #   CATALOGO_CARRERAS_URL
@@ -88,18 +88,15 @@ def normalizar_texto(valor) -> str:
     return s
 
 # ============================================================
-# Catálogo maestro de carreras
+# Catálogo maestro de carreras (primero session_state, luego Secrets)
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
-def _load_catalogo_carreras():
-    if not CATALOGO_URL:
-        raise ValueError("Falta configurar CATALOGO_CARRERAS_URL en Secrets.")
-
-    df = _load_ws_df(CATALOGO_URL, CATALOGO_SHEET)
-    df.columns = [c.strip() for c in df.columns]
+def _build_catalog_maps_from_df(df: pd.DataFrame):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
 
     required = {"carrera_id", "nombre_oficial", "variantes"}
-    if not required.issubset(df.columns):
+    if not required.issubset(set(df.columns)):
         raise ValueError("El catálogo debe tener columnas: carrera_id, nombre_oficial, variantes")
 
     var_to_id = {}
@@ -118,11 +115,32 @@ def _load_catalogo_carreras():
 
     return var_to_id, id_to_nombre
 
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_catalogo_carreras_from_secrets():
+    if not CATALOGO_URL:
+        raise ValueError("Falta configurar CATALOGO_CARRERAS_URL en Secrets.")
+    df = _load_ws_df(CATALOGO_URL, CATALOGO_SHEET)
+    return _build_catalog_maps_from_df(df)
+
+
+def _get_catalog_maps():
+    # 1) Preferir lo inyectado por app.py
+    df_cat = st.session_state.get("df_cat_carreras")
+    if isinstance(df_cat, pd.DataFrame) and not df_cat.empty:
+        return _build_catalog_maps_from_df(df_cat)
+
+    # 2) fallback a Secrets
+    return _load_catalogo_carreras_from_secrets()
+
 # ============================================================
 # Base BAJAS normalizada y enriquecida
 # ============================================================
 @st.cache_data(ttl=300, show_spinner=False)
 def get_bajas_base_df() -> pd.DataFrame:
+    if not BAJAS_SHEET_URL:
+        raise ValueError("Falta configurar BAJAS_URL en Secrets.")
+
     df = _load_ws_df(BAJAS_SHEET_URL, BAJAS_TAB_NAME)
     if df.empty:
         return df
@@ -147,7 +165,7 @@ def get_bajas_base_df() -> pd.DataFrame:
         df["FECHA_BAJA_DT"] = pd.NaT
         df["MES"] = ""
 
-    # MOTIVO
+    # MOTIVO (fix de pd.NA)
     if "MOTIVO_BAJA" in df.columns:
         def split_motivo(x):
             if pd.isna(x):
@@ -184,7 +202,7 @@ def get_bajas_base_df() -> pd.DataFrame:
     df["MOTIVO_CATEGORIA_STD"] = df["MOTIVO_RAW"].apply(std_cat)
 
     # === Enriquecimiento con catálogo maestro ===
-    var_to_id, id_to_nombre = _load_catalogo_carreras()
+    var_to_id, id_to_nombre = _get_catalog_maps()
     df["AREA_ID"] = df["AREA_norm"].map(var_to_id)
     df["AREA_OFICIAL"] = df["AREA_ID"].map(id_to_nombre)
 
