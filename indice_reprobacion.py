@@ -275,7 +275,8 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     # =========================
     # ✅ GRÁFICA EN PICOS POR CICLO (LO QUE NECESITAS EN DC)
     # =========================
-    st.markdown("## Histórico de reprobados por ciclo (picos)")
+    st.markdown("## Tendencia de reprobación por ciclo")
+
 
     if "CICLO" not in f.columns or f["CICLO"].dropna().empty:
         st.info("No se detectó una columna CICLO usable para construir el histórico.")
