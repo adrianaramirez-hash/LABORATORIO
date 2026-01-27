@@ -58,9 +58,6 @@ def _load_reprobacion_from_gsheets(url: str, sheet_name: str | None = None) -> p
     cal_col = _pick_col(df, ["CALIF FINAL", "CALIF_FINAL", "CALIFICACION FINAL", "CALIFICACIÓN FINAL"])
     if cal_col and cal_col != "CALIF_FINAL":
         df = df.rename(columns={cal_col: "CALIF_FINAL"})
-    elif cal_col is None:
-        # si no existe, la dejamos (pero avisaremos en UI)
-        pass
 
     # Normalizar MATERIA
     mat_col = _pick_col(df, ["MATERIA", "ASIGNATURA"])
@@ -85,21 +82,20 @@ def _load_reprobacion_from_gsheets(url: str, sheet_name: str | None = None) -> p
     return df
 
 
-def _bar_top_materias(df_mat: pd.DataFrame, top_n: int = 20):
-    if df_mat.empty:
+def _bar_top_carreras(df_area: pd.DataFrame, top_n: int = 20):
+    if df_area.empty:
         return None
-
-    d = df_mat.sort_values("REPROBADOS_UNICOS", ascending=False).head(top_n).copy()
-    d["MATERIA_WR"] = d["MATERIA"].astype(str)
+    d = df_area.sort_values("REPROBADOS_UNICOS", ascending=False).head(top_n).copy()
+    d["AREA_WR"] = d["AREA"].astype(str)
 
     chart = (
         alt.Chart(d)
         .mark_bar()
         .encode(
-            y=alt.Y("MATERIA_WR:N", sort="-x", title=None),
+            y=alt.Y("AREA_WR:N", sort="-x", title=None),
             x=alt.X("REPROBADOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
             tooltip=[
-                alt.Tooltip("MATERIA_WR:N", title="Materia"),
+                alt.Tooltip("AREA_WR:N", title="Carrera/Servicio"),
                 alt.Tooltip("REPROBADOS_REGISTROS:Q", title="Registros"),
                 alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos"),
                 alt.Tooltip("PROM_CALIF:Q", title="Prom. calif", format=".2f"),
@@ -110,16 +106,41 @@ def _bar_top_materias(df_mat: pd.DataFrame, top_n: int = 20):
     return chart
 
 
+def _bar_top_materias_area(df_mat_area: pd.DataFrame, top_n: int = 20):
+    if df_mat_area.empty:
+        return None
+    d = df_mat_area.sort_values("REPROBADOS_UNICOS", ascending=False).head(top_n).copy()
+    d["MAT_LABEL"] = d["MATERIA"].astype(str) + "  —  " + d["AREA"].astype(str)
+
+    chart = (
+        alt.Chart(d)
+        .mark_bar()
+        .encode(
+            y=alt.Y("MAT_LABEL:N", sort="-x", title=None),
+            x=alt.X("REPROBADOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
+            tooltip=[
+                alt.Tooltip("AREA:N", title="Carrera/Servicio"),
+                alt.Tooltip("MATERIA:N", title="Materia"),
+                alt.Tooltip("REPROBADOS_REGISTROS:Q", title="Registros"),
+                alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos"),
+                alt.Tooltip("PROM_CALIF:Q", title="Prom. calif", format=".2f"),
+            ],
+        )
+        .properties(height=max(360, min(1200, 20 * len(d))))
+    )
+    return chart
+
+
 # =========================================
 # Render principal
 # =========================================
 def render_indice_reprobacion(vista: str | None = None, carrera: str | None = None):
     st.subheader("Índice de reprobación (base de reprobados)")
 
-    # Nota clave (para no confundir a Dirección)
+    # Ajuste: quitar la frase del índice (%) real
     st.info(
-        "Esta base contiene registros de reprobación. Aquí verás **conteos y tendencias de reprobados**. "
-        "El **índice (%) real** requiere el total de evaluados/inscritos por materia y ciclo."
+        "Esta base contiene registros de reprobación. "
+        "Aquí verás **conteos y tendencias de reprobados**."
     )
 
     if not vista:
@@ -226,85 +247,137 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     st.divider()
 
     # ---------------------------
-    # KPIs
+    # KPIs (sin "Materia con más reprobados")
     # ---------------------------
     reprob_reg = len(f)
     alumnos_unicos = f["MATRICULA"].nunique() if "MATRICULA" in f.columns else pd.NA
     prom_calif = float(_to_num(f["CALIF_FINAL"]).mean()) if "CALIF_FINAL" in f.columns else pd.NA
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Reprobaciones (registros)", f"{reprob_reg:,}")
     c2.metric("Alumnos reprobados (únicos)", f"{alumnos_unicos:,}" if pd.notna(alumnos_unicos) else "—")
     c3.metric("Promedio calificación (reprobados)", f"{prom_calif:.2f}" if pd.notna(prom_calif) else "—")
 
-    # Materia top
-    top_materia = (
-        f.groupby("MATERIA")["MATRICULA"].nunique().sort_values(ascending=False).index[0]
-        if "MATRICULA" in f.columns and f["MATERIA"].notna().any()
-        else (
-            f["MATERIA"].value_counts().index[0] if f["MATERIA"].notna().any() else "—"
-        )
-    )
-    c4.metric("Materia con más reprobados", str(top_materia))
-
     st.divider()
 
-    # ---------------------------
-    # Tabla por materia
-    # ---------------------------
-    g = f.groupby("MATERIA", dropna=False)
+    # =========================================================
+    # 1) COMPARATIVO ENTRE CARRERAS (AREA) — mayor a menor
+    # =========================================================
+    st.markdown("## Comparativo por carrera/servicio (AREA)")
 
-    df_mat = pd.DataFrame({
-        "MATERIA": g.size().index.astype(str),
-        "REPROBADOS_REGISTROS": g.size().values,
+    gA = f.groupby("AREA", dropna=False)
+
+    df_area = pd.DataFrame({
+        "AREA": gA.size().index.astype(str),
+        "REPROBADOS_REGISTROS": gA.size().values,
     })
 
     if "MATRICULA" in f.columns:
-        df_mat["REPROBADOS_UNICOS"] = g["MATRICULA"].nunique().values
+        df_area["REPROBADOS_UNICOS"] = gA["MATRICULA"].nunique().values
     else:
-        df_mat["REPROBADOS_UNICOS"] = df_mat["REPROBADOS_REGISTROS"]
+        df_area["REPROBADOS_UNICOS"] = df_area["REPROBADOS_REGISTROS"]
 
     if "CALIF_FINAL" in f.columns:
-        df_mat["PROM_CALIF"] = g["CALIF_FINAL"].apply(lambda s: _to_num(s).mean()).values
-        df_mat["MIN_CALIF"] = g["CALIF_FINAL"].apply(lambda s: _to_num(s).min()).values
-        df_mat["MAX_CALIF"] = g["CALIF_FINAL"].apply(lambda s: _to_num(s).max()).values
+        df_area["PROM_CALIF"] = gA["CALIF_FINAL"].apply(lambda s: _to_num(s).mean()).values
     else:
-        df_mat["PROM_CALIF"] = pd.NA
-        df_mat["MIN_CALIF"] = pd.NA
-        df_mat["MAX_CALIF"] = pd.NA
+        df_area["PROM_CALIF"] = pd.NA
 
-    df_mat = df_mat.sort_values("REPROBADOS_UNICOS", ascending=False).reset_index(drop=True)
+    # Orden SIEMPRE de mayor a menor
+    df_area = df_area.sort_values("REPROBADOS_UNICOS", ascending=False).reset_index(drop=True)
 
-    st.markdown("### Reprobación por materia (ciclo seleccionado)")
-    st.dataframe(df_mat, use_container_width=True)
+    # KPI de la carrera con mayor reprobación (por base actual)
+    top_area = df_area["AREA"].iloc[0] if not df_area.empty else "—"
+    top_area_val = df_area["REPROBADOS_UNICOS"].iloc[0] if not df_area.empty else pd.NA
 
-    # ---------------------------
-    # Gráfica comparativa (Top N)
-    # ---------------------------
-    st.markdown("### Comparativo de materias (Top)")
-    top_n = st.slider("Top N materias", min_value=10, max_value=60, value=20, step=5)
-    chart = _bar_top_materias(df_mat, top_n=top_n)
-    if chart is not None:
-        st.altair_chart(chart, use_container_width=True)
+    cA1, cA2 = st.columns([2, 1])
+    cA1.metric("Carrera/Servicio con mayor reprobación", str(top_area))
+    cA2.metric("Reprobados (únicos)", f"{int(top_area_val):,}" if pd.notna(top_area_val) else "—")
+
+    st.dataframe(df_area, use_container_width=True)
+
+    st.markdown("### Top carreras/servicios (comparativo)")
+    top_n_area = st.slider("Top N carreras", min_value=5, max_value=50, value=20, step=5)
+    chart_area = _bar_top_carreras(df_area, top_n=top_n_area)
+    if chart_area is not None:
+        st.altair_chart(chart_area, use_container_width=True)
 
     st.divider()
 
-    # ---------------------------
-    # Histórico por materia (drill-down)
-    # ---------------------------
-    st.markdown("### Histórico por materia (reprobados por ciclo)")
+    # =========================================================
+    # 2) MATERIAS DE LA CARRERA CON MAYOR REPROBACIÓN
+    #    (y/o carrera seleccionada), SIEMPRE con AREA
+    # =========================================================
+    st.markdown("## Materias con mayor reprobación dentro de una carrera")
 
-    materia_sel = st.selectbox("Materia", ["(Selecciona)"] + df_mat["MATERIA"].tolist(), index=0)
+    area_sel = st.selectbox(
+        "Selecciona carrera/servicio (por default: la de mayor reprobación)",
+        options=df_area["AREA"].tolist() if not df_area.empty else [],
+        index=0 if not df_area.empty else 0,
+    )
+
+    ff = f[f["AREA"].astype(str).str.strip() == str(area_sel).strip()].copy()
+    if ff.empty:
+        st.info("No hay registros para esa carrera con los filtros actuales.")
+        return
+
+    gM = ff.groupby(["AREA", "MATERIA"], dropna=False)
+
+    df_mat_area = pd.DataFrame({
+        "AREA": [i[0] for i in gM.size().index],
+        "MATERIA": [i[1] for i in gM.size().index],
+        "REPROBADOS_REGISTROS": gM.size().values,
+    })
+
+    if "MATRICULA" in ff.columns:
+        df_mat_area["REPROBADOS_UNICOS"] = gM["MATRICULA"].nunique().values
+    else:
+        df_mat_area["REPROBADOS_UNICOS"] = df_mat_area["REPROBADOS_REGISTROS"]
+
+    if "CALIF_FINAL" in ff.columns:
+        df_mat_area["PROM_CALIF"] = gM["CALIF_FINAL"].apply(lambda s: _to_num(s).mean()).values
+        df_mat_area["MIN_CALIF"] = gM["CALIF_FINAL"].apply(lambda s: _to_num(s).min()).values
+        df_mat_area["MAX_CALIF"] = gM["CALIF_FINAL"].apply(lambda s: _to_num(s).max()).values
+    else:
+        df_mat_area["PROM_CALIF"] = pd.NA
+        df_mat_area["MIN_CALIF"] = pd.NA
+        df_mat_area["MAX_CALIF"] = pd.NA
+
+    # Orden SIEMPRE de mayor a menor
+    df_mat_area = df_mat_area.sort_values("REPROBADOS_UNICOS", ascending=False).reset_index(drop=True)
+
+    st.markdown("### Reprobación por materia (siempre mostrando AREA)")
+    st.dataframe(df_mat_area, use_container_width=True)
+
+    st.markdown("### Comparativo de materias (Top) — dentro de la carrera seleccionada")
+    top_n_mat = st.slider("Top N materias", min_value=10, max_value=60, value=20, step=5)
+    chart_mat = _bar_top_materias_area(df_mat_area, top_n=top_n_mat)
+    if chart_mat is not None:
+        st.altair_chart(chart_mat, use_container_width=True)
+
+    st.divider()
+
+    # =========================================================
+    # 3) HISTÓRICO por materia (dentro de la carrera seleccionada)
+    # =========================================================
+    st.markdown("## Histórico por materia (reprobados por ciclo) — dentro de la carrera")
+
+    materia_sel = st.selectbox(
+        "Materia (dentro de la carrera seleccionada)",
+        ["(Selecciona)"] + df_mat_area["MATERIA"].astype(str).tolist(),
+        index=0,
+    )
+
     if materia_sel != "(Selecciona)":
-        fh = df[df["MATERIA"].astype(str).str.strip() == str(materia_sel).strip()].copy()
+        fh = df[
+            (df["AREA"].astype(str).str.strip() == str(area_sel).strip())
+            & (df["MATERIA"].astype(str).str.strip() == str(materia_sel).strip())
+        ].copy()
 
-        # Respetar también el filtro de AREA si aplica
-        if vista != "Dirección General":
-            fh = fh[fh["AREA"].astype(str).str.strip() == (carrera or "").strip()]
-        else:
-            # si DG filtró AREA, se mantiene vía f; aquí replicamos ese filtro aplicando intersección con f
-            # (simplemente usamos los ciclos disponibles dentro de f para esa materia)
-            fh = f[f["MATERIA"].astype(str).str.strip() == str(materia_sel).strip()].copy()
+        # además, respeta filtros de ciclo/escuela/nivel que ya están en f (intersección)
+        fh = f[
+            (f["AREA"].astype(str).str.strip() == str(area_sel).strip())
+            & (f["MATERIA"].astype(str).str.strip() == str(materia_sel).strip())
+        ].copy()
 
         if fh.empty:
             st.info("No hay datos históricos para esa materia con los filtros actuales.")
