@@ -4,6 +4,8 @@ import streamlit as st
 import altair as alt
 import gspread
 
+import bajas_retencion  # ✅ nuevo: para traer resumen de bajas
+
 # =========================================
 # Config
 # =========================================
@@ -29,6 +31,38 @@ def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
 
 def _to_num(s):
     return pd.to_numeric(s, errors="coerce")
+
+
+def _ciclo_to_int(x: str | None) -> int | None:
+    """
+    Convierte ciclo del selectbox (string) a int si se puede.
+    Ej: "201" -> 201. Si no, None.
+    """
+    if x is None:
+        return None
+    s = str(x).strip()
+    if not s or s in ["(Todos)", "(Todos)"]:
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def _user_can_see_bajas() -> bool:
+    """
+    Solo mostrar el bloque de bajas si:
+      - el usuario tiene ALL, o
+      - el módulo 'bajas_retencion' está en user_modulos
+    """
+    allow_all = bool(st.session_state.get("user_allow_all", False))
+    if allow_all:
+        return True
+    mods = st.session_state.get("user_modulos", set())
+    try:
+        return "bajas_retencion" in set(mods)
+    except Exception:
+        return False
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -137,7 +171,6 @@ def _bar_top_materias_area(df_mat_area: pd.DataFrame, top_n: int = 20):
 def render_indice_reprobacion(vista: str | None = None, carrera: str | None = None):
     st.subheader("Índice de reprobación (base de reprobados)")
 
-    # Ajuste: quitar la frase del índice (%) real
     st.info(
         "Esta base contiene registros de reprobación. "
         "Aquí verás **conteos y tendencias de reprobados**."
@@ -167,7 +200,6 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         st.warning("La hoja está vacía o no trae datos.")
         return
 
-    # Validación de columnas mínimas
     required = ["CICLO", "AREA", "MATERIA"]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -175,11 +207,9 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         st.caption(f"Columnas detectadas: {', '.join(df.columns)}")
         return
 
-    # CALIF_FINAL es deseable pero no obligatoria
     if "CALIF_FINAL" in df.columns:
         df["CALIF_FINAL"] = _to_num(df["CALIF_FINAL"])
 
-    # Limpieza ligera
     df["CICLO"] = df["CICLO"].astype(str).str.strip()
     df["AREA"] = df["AREA"].astype(str).str.strip()
     df["MATERIA"] = df["MATERIA"].astype(str).str.strip()
@@ -187,15 +217,18 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         df["MATRICULA"] = df["MATRICULA"].astype(str).str.strip()
 
     # ---------------------------
-    # Filtros (replicando patrón vista/carrera)
+    # Filtros
     # ---------------------------
     f = df.copy()
 
-    # DG: filtros libres. DC: AREA fijo.
+    # Para saber el contexto actual (ciclo/area) y usarlo en bajas
+    ciclo_sel = "(Todos)"
+    area_sel = "(Todas)"
+    carrera_fix = (carrera or "").strip()
+
     if vista == "Dirección General":
         c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.8, 1.2])
 
-        # ESCUELA y NIVEL si existen
         with c1:
             if "ESCUELA" in f.columns:
                 esc_opts = ["(Todas)"] + sorted(f["ESCUELA"].dropna().astype(str).str.strip().unique().tolist())
@@ -228,8 +261,6 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
             f = f[f["CICLO"].astype(str).str.strip() == ciclo_sel]
 
     else:
-        # Director de carrera
-        carrera_fix = (carrera or "").strip()
         st.text_input("Carrera (fija por vista)", value=carrera_fix, disabled=True)
 
         ciclo_opts = ["(Todos)"] + sorted(f["CICLO"].dropna().astype(str).str.strip().unique().tolist())
@@ -244,10 +275,37 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         st.warning("No hay registros con los filtros seleccionados.")
         return
 
+    # ===========================
+    # ✅ BLOQUE NUEVO: Resumen de Bajas (solo si tienes permiso)
+    # ===========================
+    if _user_can_see_bajas():
+        ciclo_int = _ciclo_to_int(ciclo_sel)  # None si (Todos) o si no es num
+        area_ctx = None
+
+        if vista == "Dirección General":
+            if area_sel != "(Todas)":
+                area_ctx = area_sel
+        else:
+            area_ctx = carrera_fix or None
+
+        with st.expander("📌 Resumen de bajas (contexto)", expanded=True):
+            try:
+                res = bajas_retencion.resumen_bajas_por_filtros(ciclo=ciclo_int, area=area_ctx)
+                st.metric("Bajas (en el mismo contexto)", f"{res.get('total', 0):,}")
+                top = res.get("top_motivos")
+                if top is not None and not top.empty:
+                    st.markdown("**Top motivos (categoría)**")
+                    st.dataframe(top, use_container_width=True)
+                else:
+                    st.caption("Sin motivos (no hay datos o no hay MOTIVO_BAJA).")
+            except Exception as e:
+                st.error("No pude calcular el resumen de bajas (revisa configuración/permisos del módulo de bajas).")
+                st.exception(e)
+
     st.divider()
 
     # ---------------------------
-    # KPIs (sin "Materia con más reprobados")
+    # KPIs
     # ---------------------------
     reprob_reg = len(f)
     alumnos_unicos = f["MATRICULA"].nunique() if "MATRICULA" in f.columns else pd.NA
@@ -282,10 +340,8 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     else:
         df_area["PROM_CALIF"] = pd.NA
 
-    # Orden SIEMPRE de mayor a menor
     df_area = df_area.sort_values("REPROBADOS_UNICOS", ascending=False).reset_index(drop=True)
 
-    # KPI de la carrera con mayor reprobación (por base actual)
     top_area = df_area["AREA"].iloc[0] if not df_area.empty else "—"
     top_area_val = df_area["REPROBADOS_UNICOS"].iloc[0] if not df_area.empty else pd.NA
 
@@ -305,17 +361,16 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
 
     # =========================================================
     # 2) MATERIAS DE LA CARRERA CON MAYOR REPROBACIÓN
-    #    (y/o carrera seleccionada), SIEMPRE con AREA
     # =========================================================
     st.markdown("## Materias con mayor reprobación dentro de una carrera")
 
-    area_sel = st.selectbox(
+    area_sel2 = st.selectbox(
         "Selecciona carrera/servicio (por default: la de mayor reprobación)",
         options=df_area["AREA"].tolist() if not df_area.empty else [],
         index=0 if not df_area.empty else 0,
     )
 
-    ff = f[f["AREA"].astype(str).str.strip() == str(area_sel).strip()].copy()
+    ff = f[f["AREA"].astype(str).str.strip() == str(area_sel2).strip()].copy()
     if ff.empty:
         st.info("No hay registros para esa carrera con los filtros actuales.")
         return
@@ -342,7 +397,6 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         df_mat_area["MIN_CALIF"] = pd.NA
         df_mat_area["MAX_CALIF"] = pd.NA
 
-    # Orden SIEMPRE de mayor a menor
     df_mat_area = df_mat_area.sort_values("REPROBADOS_UNICOS", ascending=False).reset_index(drop=True)
 
     st.markdown("### Reprobación por materia (siempre mostrando AREA)")
@@ -357,7 +411,7 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     st.divider()
 
     # =========================================================
-    # 3) HISTÓRICO por materia (dentro de la carrera seleccionada)
+    # 3) HISTÓRICO por materia
     # =========================================================
     st.markdown("## Histórico por materia (reprobados por ciclo) — dentro de la carrera")
 
@@ -368,14 +422,8 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     )
 
     if materia_sel != "(Selecciona)":
-        fh = df[
-            (df["AREA"].astype(str).str.strip() == str(area_sel).strip())
-            & (df["MATERIA"].astype(str).str.strip() == str(materia_sel).strip())
-        ].copy()
-
-        # además, respeta filtros de ciclo/escuela/nivel que ya están en f (intersección)
         fh = f[
-            (f["AREA"].astype(str).str.strip() == str(area_sel).strip())
+            (f["AREA"].astype(str).str.strip() == str(area_sel2).strip())
             & (f["MATERIA"].astype(str).str.strip() == str(materia_sel).strip())
         ].copy()
 
@@ -388,7 +436,6 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         else:
             hist = fh.groupby("CICLO").size().reset_index(name="REPROBADOS_UNICOS")
 
-        # Orden por ciclo (numérico si se puede)
         hist["CICLO_NUM"] = pd.to_numeric(hist["CICLO"], errors="coerce")
         hist = hist.sort_values(["CICLO_NUM", "CICLO"]).drop(columns=["CICLO_NUM"])
 
@@ -398,7 +445,10 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
             .encode(
                 x=alt.X("CICLO:N", title="Ciclo", sort=None),
                 y=alt.Y("REPROBADOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
-                tooltip=[alt.Tooltip("CICLO:N", title="Ciclo"), alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos")],
+                tooltip=[
+                    alt.Tooltip("CICLO:N", title="Ciclo"),
+                    alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos")
+                ],
             )
             .properties(height=360)
         )
