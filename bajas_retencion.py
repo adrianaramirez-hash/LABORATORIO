@@ -7,7 +7,7 @@ import re
 from google.oauth2.service_account import Credentials
 
 # ========= AJUSTA SOLO ESTO =========
-BAJAS_SHEET_URL = "PEGA_AQUI_LA_URL_DEL_SHEET_DE_BAJAS"
+BAJAS_SHEET_URL = "https://docs.google.com/spreadsheets/d/11-QVSp2zvRtsy3RA82N9j7g8zNzJGDKJqAIH9sabiUU/edit?gid=1444259240#gid=1444259240"
 BAJAS_TAB_NAME = "BAJAS"  # tu pestaña (aunque tenga espacios invisibles, lo resolvemos)
 # ====================================
 
