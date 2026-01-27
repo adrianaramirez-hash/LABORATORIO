@@ -8,6 +8,14 @@ import indice_reprobacion  # ✅ NUEVO
 import evaluacion_docente  # ✅ NUEVO (módulo Evaluación docente)
 from examenes_departamentales import render_examenes_departamentales
 
+# ✅ NUEVO: import defensivo del módulo de Bajas/Retención
+try:
+    import bajas_retencion  # este archivo lo crearás después
+    HAS_BAJAS_MOD = True
+except Exception:
+    bajas_retencion = None
+    HAS_BAJAS_MOD = False
+
 import pandas as pd
 import gspread
 import json
@@ -47,6 +55,8 @@ MOD_KEY_BY_SECCION = {
     "Ceneval": "ceneval",
     "Exámenes departamentales": "examenes_departamentales",
     "Aulas virtuales": "aulas_virtuales",
+    # ✅ NUEVO
+    "Bajas / Retención": "bajas_retencion",
 }
 
 # ============================================================
@@ -574,6 +584,8 @@ SECCIONES_TODAS = [
     "Ceneval",
     "Exámenes departamentales",
     "Aulas virtuales",
+    # ✅ NUEVO
+    "Bajas / Retención",
 ]
 
 try:
@@ -690,6 +702,21 @@ try:
             else:
                 _show_traceback_expander("Detalle técnico Aulas virtuales (diagnóstico)")
             st.stop()
+
+    # ✅ NUEVO: Bajas / Retención (defensivo)
+    elif seccion == "Bajas / Retención":
+        if not HAS_BAJAS_MOD or bajas_retencion is None:
+            st.subheader("Bajas / Retención")
+            st.warning("🧪 Módulo habilitado, pero aún no está cargado en el repositorio.")
+            st.caption("Siguiente paso: crear el archivo `bajas_retencion.py` con la función `render_bajas_retencion(vista, carrera)`.")
+        else:
+            # Requisito: que el módulo tenga esta función
+            if not hasattr(bajas_retencion, "render_bajas_retencion"):
+                st.subheader("Bajas / Retención")
+                st.error("El módulo `bajas_retencion.py` no tiene la función `render_bajas_retencion`.")
+                st.caption("Define: `def render_bajas_retencion(vista: str, carrera: str | None): ...`")
+            else:
+                bajas_retencion.render_bajas_retencion(vista=vista, carrera=carrera)
 
     else:
         st.subheader("Panel inicial")
