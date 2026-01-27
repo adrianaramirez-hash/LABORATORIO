@@ -6,16 +6,17 @@ import json
 import re
 from google.oauth2.service_account import Credentials
 
-# ========= AJUSTA ESTO =========
-BAJAS_SHEET_URL = "https://docs.google.com/spreadsheets/d/11-QVSp2zvRtsy3RA82N9j7g8zNzJGDKJqAIH9sabiUU/edit?gid=1444259240#gid=1444259240"
-BAJAS_TAB_NAME = "BAJAS"  # cambia si tu pestaña se llama distinto
-# ===============================
+# ========= AJUSTA SOLO ESTO =========
+BAJAS_SHEET_URL = "PEGA_AQUI_LA_URL_DEL_SHEET_DE_BAJAS"
+BAJAS_TAB_NAME = "BAJAS"  # tu pestaña (aunque tenga espacios invisibles, lo resolvemos)
+# ====================================
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
+# ---------------- Helpers base ----------------
 def _extract_sheet_id(url: str) -> str:
     m = re.search(r"/d/([a-zA-Z0-9-_]+)", url or "")
     if not m:
@@ -47,19 +48,51 @@ def _dedupe_headers(headers):
             out.append(h)
     return out
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _load_bajas_df() -> pd.DataFrame:
-    if "PEGA_AQUI" in BAJAS_SHEET_URL:
-        return pd.DataFrame()
+def _norm_tab_key(s: str) -> str:
+    """
+    Normaliza títulos de pestaña para comparar:
+    - quita espacios normales y NBSP
+    - colapsa espacios internos
+    - upper()
+    """
+    s = str(s or "")
+    s = s.replace("\u00A0", " ")  # NBSP -> espacio normal
+    s = s.strip()
+    s = re.sub(r"\s+", " ", s)    # colapsa
+    return s.upper()
 
+def _open_sheet():
+    if not BAJAS_SHEET_URL or "PEGA_AQUI" in BAJAS_SHEET_URL:
+        raise ValueError("Falta configurar BAJAS_SHEET_URL en bajas_retencion.py")
     gc = _get_gspread_client()
     sh = gc.open_by_key(_extract_sheet_id(BAJAS_SHEET_URL))
-    ws = sh.worksheet(BAJAS_TAB_NAME)
+    return sh
 
+def _resolve_ws(sh, desired_title: str):
+    """
+    Intenta:
+    1) exacto
+    2) match normalizado (ignora mayúsculas/espacios/NBSP)
+    Si falla: levanta WorksheetNotFound con lista de pestañas detectadas.
+    """
+    try:
+        return sh.worksheet(desired_title)
+    except Exception:
+        tabs = sh.worksheets()
+        desired_key = _norm_tab_key(desired_title)
+        for ws in tabs:
+            if _norm_tab_key(ws.title) == desired_key:
+                return ws
+        # No match: construir lista para diagnóstico
+        titles = [ws.title for ws in tabs]
+        raise gspread.exceptions.WorksheetNotFound(
+            f"No encontré la pestaña '{desired_title}'. Pestañas disponibles: {titles}"
+        )
+
+def _load_from_ws(ws) -> pd.DataFrame:
     values = ws.get_all_values()
     if not values:
         return pd.DataFrame()
-
     headers = _dedupe_headers(values[0])
     rows = values[1:]
     df = pd.DataFrame(rows, columns=headers)
@@ -68,7 +101,17 @@ def _load_bajas_df() -> pd.DataFrame:
         df[c] = df[c].astype(str)
     return df
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_bajas_df() -> pd.DataFrame:
+    sh = _open_sheet()
+    ws = _resolve_ws(sh, BAJAS_TAB_NAME)
+    return _load_from_ws(ws)
+
 def _split_motivo(x: str):
+    """
+    Espera: CATEGORIA - detalle
+    Si no hay '-', la categoría será el texto y el detalle vacío.
+    """
     s = (x or "").strip()
     if not s:
         return ("", "")
@@ -79,26 +122,39 @@ def _split_motivo(x: str):
 
 def _clean_upper(x: str) -> str:
     s = (x or "").strip()
+    s = s.replace("\u00A0", " ")  # NBSP
     s = re.sub(r"\s+", " ", s)
     return s.upper()
 
+# ---------------- Render ----------------
 def render_bajas_retencion(vista: str, carrera: str | None):
     st.subheader("Bajas / Retención")
     st.caption("Modo prueba (solo lectura).")
 
-    df = _load_bajas_df()
-    if df.empty:
-        st.warning("No hay datos cargados. Revisa BAJAS_SHEET_URL y BAJAS_TAB_NAME en `bajas_retencion.py`.")
+    try:
+        df = _load_bajas_df()
+    except gspread.exceptions.WorksheetNotFound as e:
+        st.error("No pude encontrar la pestaña de BAJAS en el Google Sheet.")
+        st.caption("Esto suele pasar por espacios invisibles o diferencias mínimas en el nombre.")
+        st.code(str(e))
+        return
+    except Exception as e:
+        st.error("No pude cargar la información de Bajas. Revisa URL y permisos del service account.")
+        st.exception(e)
         return
 
-    # columnas esperadas
+    if df.empty:
+        st.warning("La pestaña está vacía o no tiene datos.")
+        return
+
+    # columnas esperadas (defensivo)
     col_area = "AREA" if "AREA" in df.columns else None
     col_motivo = "MOTIVO_BAJA" if "MOTIVO_BAJA" in df.columns else None
     col_ciclo = "CICLO" if "CICLO" in df.columns else None
     col_grupo = "GRUPO" if "GRUPO" in df.columns else None
 
     if not col_motivo:
-        st.error("No encontré la columna MOTIVO_BAJA.")
+        st.error("No encontré la columna MOTIVO_BAJA en esta pestaña.")
         st.write("Columnas detectadas:", list(df.columns))
         return
 
@@ -108,7 +164,7 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     df["MOTIVO_CATEGORIA"], df["MOTIVO_DETALLE"] = zip(*df[col_motivo].apply(_split_motivo))
     df["MOTIVO_CATEGORIA"] = df["MOTIVO_CATEGORIA"].apply(_clean_upper)
 
-    # filtro DC por carrera
+    # filtro DC por carrera (si app.py manda carrera)
     if carrera and col_area:
         df = df[df[col_area] == str(carrera).upper()].copy()
 
@@ -129,9 +185,9 @@ def render_bajas_retencion(vista: str, carrera: str | None):
 
     if col_grupo:
         st.markdown("### Top grupos con más bajas")
-        topg = df[col_grupo].value_counts().head(15).rename("bajas")
-        st.dataframe(topg, use_container_width=True)
+        st.dataframe(df[col_grupo].value_counts().head(15).rename("bajas"), use_container_width=True)
 
     st.markdown("### Casos (detalle)")
-    cols = [c for c in ["CICLO", "CICLO INGRESO", "TIPO", "NIVEL", "AREA", "GRUPO", "ALUMNO", "FECHA_BAJA", "MOTIVO_CATEGORIA", "MOTIVO_DETALLE"] if c in df.columns]
+    cols = [c for c in ["CICLO", "CICLO INGRESO", "TIPO", "NIVEL", "AREA", "GRUPO", "ALUMNO", "FECHA_BAJA",
+                        "MOTIVO_CATEGORIA", "MOTIVO_DETALLE"] if c in df.columns]
     st.dataframe(df[cols] if cols else df, use_container_width=True, height=420)
