@@ -8,7 +8,7 @@ import altair as alt
 from google.oauth2.service_account import Credentials
 
 # ========= AJUSTA SOLO ESTO =========
-BAJAS_SHEET_URL = "https://docs.google.com/spreadsheets/d/11-QVSp2zvRtsy3RA82N9j7g8zNzJGDKJqAIH9sabiUU/edit?gid=1444259240#gid=1444259240"
+BAJAS_SHEET_URL = "PEGA_AQUI_LA_URL_DEL_SHEET_DE_BAJAS"
 BAJAS_TAB_NAME = "BAJAS"
 # ====================================
 
@@ -178,7 +178,6 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     # 2) Columnas esperadas (defensivo)
     col_ciclo = "CICLO" if "CICLO" in df0.columns else None
     col_area = "AREA" if "AREA" in df0.columns else None
-    col_grupo = "GRUPO" if "GRUPO" in df0.columns else None
     col_fecha = "FECHA_BAJA" if "FECHA_BAJA" in df0.columns else None
     col_motivo = "MOTIVO_BAJA" if "MOTIVO_BAJA" in df0.columns else None
 
@@ -206,10 +205,9 @@ def render_bajas_retencion(vista: str, carrera: str | None):
         df["FECHA_BAJA_DT"] = pd.NaT
         df["MES"] = ""
 
-    # 4) Filtros ARRIBA (no sidebar)
+    # 4) Filtros ARRIBA (sin grupo)
     st.markdown("### Filtros")
 
-    # Opciones base (antes de filtrar)
     areas = []
     if col_area:
         areas = sorted([a for a in df[col_area].dropna().unique().tolist() if str(a).strip()])
@@ -218,33 +216,23 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     if col_ciclo:
         ciclos = sorted([c for c in df[col_ciclo].dropna().unique().tolist() if pd.notna(c)])
 
-    grupos = []
-    if col_grupo:
-        grupos = sorted([g for g in df[col_grupo].dropna().unique().tolist() if str(g).strip()])
-
     cats = sorted(df["MOTIVO_CATEGORIA_STD"].dropna().unique().tolist())
 
-    # Layout de filtros
-    # DC: área fija por carrera
     if carrera and col_area:
-        cA, cC, cG, cM = st.columns([2.2, 1.2, 1.2, 1.8])
+        cA, cC, cM = st.columns([2.4, 1.2, 2.0])
         with cA:
             st.text_input("Área", value=str(carrera).upper(), disabled=True)
             area_sel = str(carrera).upper()
         with cC:
             ciclo_sel = st.selectbox("Ciclo", options=["(Todos)"] + ciclos, index=0)
-        with cG:
-            grupo_sel = st.selectbox("Grupo", options=["(Todos)"] + grupos, index=0)
         with cM:
             cat_sel = st.selectbox("Motivo (categoría)", options=["(Todos)"] + cats, index=0)
     else:
-        cA, cC, cG, cM = st.columns([2.2, 1.2, 1.2, 1.8])
+        cA, cC, cM = st.columns([2.4, 1.2, 2.0])
         with cA:
             area_sel = st.selectbox("Área", options=["(Todas)"] + areas, index=0) if col_area else "(Todas)"
         with cC:
             ciclo_sel = st.selectbox("Ciclo", options=["(Todos)"] + ciclos, index=0) if col_ciclo else "(Todos)"
-        with cG:
-            grupo_sel = st.selectbox("Grupo", options=["(Todos)"] + grupos, index=0) if col_grupo else "(Todos)"
         with cM:
             cat_sel = st.selectbox("Motivo (categoría)", options=["(Todos)"] + cats, index=0)
 
@@ -256,9 +244,6 @@ def render_bajas_retencion(vista: str, carrera: str | None):
 
     if col_ciclo and ciclo_sel != "(Todos)":
         df = df[df[col_ciclo] == ciclo_sel].copy()
-
-    if col_grupo and grupo_sel != "(Todos)":
-        df = df[df[col_grupo] == grupo_sel].copy()
 
     if cat_sel != "(Todos)":
         df = df[df["MOTIVO_CATEGORIA_STD"] == cat_sel].copy()
@@ -272,9 +257,9 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     with k2:
         st.metric("Motivos únicos", f"{df['MOTIVO_CATEGORIA_STD'].nunique():,}")
     with k3:
-        st.metric("Grupos con bajas", f"{df[col_grupo].nunique():,}" if col_grupo else "—")
-    with k4:
         st.metric("Áreas presentes", f"{df[col_area].nunique():,}" if col_area else "—")
+    with k4:
+        st.metric("Ciclos presentes", f"{df[col_ciclo].nunique():,}" if col_ciclo else "—")
 
     # 6) Tendencia
     st.markdown("### Tendencia")
@@ -309,7 +294,7 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     else:
         st.info("No hay FECHA_BAJA o CICLO usable para tendencia.")
 
-    # 7) Pareto de motivos
+    # 7) Motivos (categoría)
     st.markdown("### Motivos de baja (categoría homologada)")
     vc = df["MOTIVO_CATEGORIA_STD"].value_counts().reset_index()
     vc.columns = ["motivo", "bajas"]
@@ -334,7 +319,7 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     )
     st.altair_chart(pareto, use_container_width=True)
 
-    # 8) Resumen ciclo–área (útil para DG)
+    # 8) Resumen ciclo–área
     if col_ciclo and col_area:
         st.markdown("### Resumen por ciclo y área")
         resumen = (
@@ -361,7 +346,7 @@ def render_bajas_retencion(vista: str, carrera: str | None):
     # 10) Tabla de casos
     st.markdown("### Casos (detalle)")
     cols = [c for c in [
-        "CICLO", "CICLO INGRESO", "TIPO", "NIVEL", "AREA", "GRUPO", "ALUMNO",
+        "CICLO", "CICLO INGRESO", "TIPO", "NIVEL", "AREA", "ALUMNO",
         "FECHA_BAJA", "MOTIVO_CATEGORIA_RAW", "MOTIVO_CATEGORIA_STD", "MOTIVO_DETALLE"
     ] if c in df.columns]
     st.dataframe(df[cols] if cols else df, use_container_width=True, height=520)
