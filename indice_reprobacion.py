@@ -4,7 +4,7 @@ import streamlit as st
 import altair as alt
 import gspread
 
-import bajas_retencion  # ✅ nuevo: para traer resumen de bajas
+import bajas_retencion  # ✅ nuevo (para traer resumen de bajas)
 
 # =========================================
 # Config
@@ -33,15 +33,12 @@ def _to_num(s):
     return pd.to_numeric(s, errors="coerce")
 
 
-def _ciclo_to_int(x: str | None) -> int | None:
-    """
-    Convierte ciclo del selectbox (string) a int si se puede.
-    Ej: "201" -> 201. Si no, None.
-    """
+def _ciclo_to_int(x) -> int | None:
+    """Convierte '201' -> 201; '(Todos)' -> None; si no se puede -> None."""
     if x is None:
         return None
     s = str(x).strip()
-    if not s or s in ["(Todos)", "(Todos)"]:
+    if not s or s == "(Todos)":
         return None
     try:
         return int(float(s))
@@ -50,13 +47,8 @@ def _ciclo_to_int(x: str | None) -> int | None:
 
 
 def _user_can_see_bajas() -> bool:
-    """
-    Solo mostrar el bloque de bajas si:
-      - el usuario tiene ALL, o
-      - el módulo 'bajas_retencion' está en user_modulos
-    """
-    allow_all = bool(st.session_state.get("user_allow_all", False))
-    if allow_all:
+    """Muestra el bloque solo si el usuario tiene ALL o el módulo bajas_retencion."""
+    if bool(st.session_state.get("user_allow_all", False)):
         return True
     mods = st.session_state.get("user_modulos", set())
     try:
@@ -179,7 +171,6 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     if not vista:
         vista = "Dirección General"
 
-    # URL desde secrets
     url = st.secrets.get("IR_URL", "").strip()
     if not url:
         st.error("Falta configurar `IR_URL` en Secrets (URL del Google Sheet de reprobación).")
@@ -187,7 +178,6 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
 
     sheet_name = st.secrets.get("IR_SHEET_NAME", SHEET_NAME_DEFAULT).strip() or None
 
-    # Carga
     try:
         with st.spinner("Cargando datos de reprobación (Google Sheets)…"):
             df = _load_reprobacion_from_gsheets(url, sheet_name=sheet_name)
@@ -221,7 +211,6 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
     # ---------------------------
     f = df.copy()
 
-    # Para saber el contexto actual (ciclo/area) y usarlo en bajas
     ciclo_sel = "(Todos)"
     area_sel = "(Todas)"
     carrera_fix = (carrera or "").strip()
@@ -276,30 +265,29 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
         return
 
     # ===========================
-    # ✅ BLOQUE NUEVO: Resumen de Bajas (solo si tienes permiso)
+    # ✅ NUEVO: Resumen de Bajas (contexto)
     # ===========================
     if _user_can_see_bajas():
-        ciclo_int = _ciclo_to_int(ciclo_sel)  # None si (Todos) o si no es num
-        area_ctx = None
+        ciclo_int = _ciclo_to_int(ciclo_sel)  # None si (Todos) o no numérico
 
         if vista == "Dirección General":
-            if area_sel != "(Todas)":
-                area_ctx = area_sel
+            area_ctx = None if area_sel == "(Todas)" else area_sel
         else:
             area_ctx = carrera_fix or None
 
         with st.expander("📌 Resumen de bajas (contexto)", expanded=True):
             try:
                 res = bajas_retencion.resumen_bajas_por_filtros(ciclo=ciclo_int, area=area_ctx)
-                st.metric("Bajas (en el mismo contexto)", f"{res.get('total', 0):,}")
+                st.metric("Bajas (mismo ciclo/área)", f"{res.get('total', 0):,}")
+
                 top = res.get("top_motivos")
                 if top is not None and not top.empty:
                     st.markdown("**Top motivos (categoría)**")
                     st.dataframe(top, use_container_width=True)
                 else:
-                    st.caption("Sin motivos (no hay datos o no hay MOTIVO_BAJA).")
+                    st.caption("Sin datos de motivos para este filtro.")
             except Exception as e:
-                st.error("No pude calcular el resumen de bajas (revisa configuración/permisos del módulo de bajas).")
+                st.error("No pude calcular el resumen de bajas. Revisa BAJAS_SHEET_URL / permisos / pestaña.")
                 st.exception(e)
 
     st.divider()
@@ -445,10 +433,7 @@ def render_indice_reprobacion(vista: str | None = None, carrera: str | None = No
             .encode(
                 x=alt.X("CICLO:N", title="Ciclo", sort=None),
                 y=alt.Y("REPROBADOS_UNICOS:Q", title="Alumnos reprobados (únicos)"),
-                tooltip=[
-                    alt.Tooltip("CICLO:N", title="Ciclo"),
-                    alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos")
-                ],
+                tooltip=[alt.Tooltip("CICLO:N", title="Ciclo"), alt.Tooltip("REPROBADOS_UNICOS:Q", title="Únicos")],
             )
             .properties(height=360)
         )
