@@ -57,6 +57,9 @@ MOD_KEY_BY_SECCION = {
     "Aulas virtuales": "aulas_virtuales",
     # ✅ NUEVO
     "Bajas / Retención": "bajas_retencion",
+    # ✅ NUEVO
+"Seguimiento de Inscripciones": "seguimiento_inscripciones",
+
 }
 
 # ============================================================
