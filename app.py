@@ -55,10 +55,8 @@ MOD_KEY_BY_SECCION = {
     "Ceneval": "ceneval",
     "Exámenes departamentales": "examenes_departamentales",
     "Aulas virtuales": "aulas_virtuales",
-    # ✅ NUEVO
     "Bajas / Retención": "bajas_retencion",
-    # ✅ NUEVO
-"Seguimiento de Inscripciones": "seguimiento_inscripciones",
+    "Seguimiento de Inscripciones": "seguimiento_inscripciones",
 
 }
 
