@@ -21,40 +21,40 @@ MOD_KEY_BY_SECCION = {
 }
 
 
-def cargar_modulo_y_ejecutar(module_key: str):
+def ejecutar_modulo(module_key: str):
     """
-    Importa dinámicamente el módulo (por nombre de archivo) y ejecuta run().
-    - module_key debe coincidir con el nombre del archivo .py (sin .py)
-      Ej: 'encuesta_calidad' -> encuesta_calidad.py
+    Compatibilidad TOTAL con tu ecosistema actual:
+    - Si el módulo trae run(): lo llama.
+    - Si NO trae run(): lo ejecuta como script (recargando el import).
     """
     try:
+        # Importa o recupera el módulo
         mod = importlib.import_module(module_key)
+
+        # Si ya está importado, lo recargamos para que se vuelva a ejecutar su código top-level
+        mod = importlib.reload(mod)
+
     except ModuleNotFoundError:
         st.error(
-            f"No se encontró el archivo del módulo: **{module_key}.py**\n\n"
-            f"Verifica que exista en la misma carpeta del ecosistema (o en el PYTHONPATH)."
+            f"No se encontró el módulo: **{module_key}.py**\n\n"
+            "Verifica que el archivo exista con ese nombre exacto."
         )
         st.stop()
     except Exception as e:
-        st.error(f"Error importando el módulo **{module_key}**: {e}")
+        st.error(f"Error importando/recargando **{module_key}**: {e}")
         st.stop()
 
-    if not hasattr(mod, "run"):
-        st.error(
-            f"El módulo **{module_key}.py** existe, pero no tiene la función **run()**.\n\n"
-            f"Agrega:\n\n"
-            f"```python\n"
-            f"def run():\n"
-            f"    ...\n"
-            f"```"
-        )
-        st.stop()
-
-    try:
-        mod.run()
-    except Exception as e:
-        st.error(f"Error ejecutando **{module_key}.run()**: {e}")
-        st.stop()
+    # Si tiene run(), úsalo (por si en el futuro migras a esa estructura)
+    if hasattr(mod, "run"):
+        try:
+            mod.run()
+        except Exception as e:
+            st.error(f"Error ejecutando **{module_key}.run()**: {e}")
+            st.stop()
+    # Si NO tiene run(), ya se ejecutó al hacer import/reload (modo script)
+    else:
+        # No hacemos nada: el contenido del módulo ya se renderizó
+        pass
 
 
 def main():
@@ -68,7 +68,7 @@ def main():
     )
 
     module_key = MOD_KEY_BY_SECCION[seccion_visible]
-    cargar_modulo_y_ejecutar(module_key)
+    ejecutar_modulo(module_key)
 
 
 if __name__ == "__main__":
