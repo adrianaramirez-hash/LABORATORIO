@@ -34,7 +34,11 @@ from catalogos import cargar_cat_carreras_desde_gsheets
 # ============================================================
 # Configuración básica (antes de cualquier st.*)
 # ============================================================
-st.set_page_config(page_title="Dirección Académica", layout="wide")
+st.set_page_config(
+    page_title="Dirección Académica",
+    layout="wide",
+    initial_sidebar_state="expanded",  # ✅ sidebar abierto por defecto
+)
 
 DEBUG = False
 
@@ -417,7 +421,7 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
 
 
 # ============================================================
-# Header (logo + título)
+# Header (logo + título) - se queda en el body
 # ============================================================
 logo_url = "udl_logo.png"
 try:
@@ -437,14 +441,13 @@ st.divider()
 # ============================================================
 # LOGIN / ACCESO (OIDC Google con st.login)
 # ============================================================
-st.subheader("Acceso")
-
 try:
     is_logged_in = bool(getattr(st.user, "is_logged_in", False))
 except Exception:
     is_logged_in = False
 
 if not is_logged_in:
+    st.subheader("Acceso")
     st.info("Inicia sesión con Google para acceder a la plataforma.")
     if st.button("Iniciar sesión con Google", use_container_width=True):
         st.login("google")
@@ -460,6 +463,7 @@ if "user_rol" not in st.session_state:
         res = resolver_permiso_por_email(user_email, df_accesos)
 
         if not res["ok"]:
+            st.subheader("Acceso")
             st.error(res["mensaje"])
             st.caption(f"Correo autenticado: {user_email or '(no disponible)'}")
 
@@ -502,11 +506,35 @@ if "user_rol" not in st.session_state:
             _show_traceback_expander()
         st.stop()
 
-# 3) Sesión activa (mostrar estado + botón salir)
-c1, c2 = st.columns([4, 1], vertical_alignment="center")
-with c1:
-    st.success(f"Sesión activa: {st.session_state.get('user_email','')}")
-with c2:
+# ============================================================
+# Catálogo maestro en memoria (disponible para módulos)
+# ============================================================
+df_cat_carreras = get_cat_carreras_df()
+st.session_state["df_cat_carreras"] = df_cat_carreras
+
+# ============================================================
+# Contexto de usuario (DG vs DC vs DF)
+# ============================================================
+ROL = st.session_state["user_rol"]
+
+if ROL == "DG":
+    vista = "Dirección General"
+    carrera = None
+elif ROL == "DF":
+    vista = "Dirección Finanzas"
+    carrera = None
+else:
+    vista = "Director de carrera"
+    carrera = None  # se define en sidebar
+
+# ============================================================
+# Menú lateral (izquierdo): sesión + contexto + navegación
+# ============================================================
+with st.sidebar:
+    st.markdown("### Navegación")
+
+    # Estado sesión + salir (compacto)
+    st.success(f"Sesión activa:\n{st.session_state.get('user_email','')}")
     if st.button("Salir", use_container_width=True):
         try:
             st.logout()
@@ -523,126 +551,100 @@ with c2:
             st.session_state.pop(k, None)
         st.rerun()
 
-st.divider()
+    st.caption(f"Rol: **{ROL}**")
+    st.caption(f"Vista: **{vista}**")
+    st.divider()
 
-# ============================================================
-# Catálogo maestro en memoria (disponible para módulos)
-# ============================================================
-df_cat_carreras = get_cat_carreras_df()
-st.session_state["df_cat_carreras"] = df_cat_carreras
+    # Selector DC de carrera/servicio (solo si aplica)
+    if ROL == "DC":
+        SERVICIOS_DC = st.session_state.get("user_servicios") or []
+        if isinstance(SERVICIOS_DC, str):
+            SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
 
+        SERVICIOS_DC = [_normalize_servicio_asignado(s) for s in SERVICIOS_DC]
+        SERVICIOS_DC = [s for s in SERVICIOS_DC if s]
+
+        seen = set()
+        SERVICIOS_DC = [x for x in SERVICIOS_DC if not (x in seen or seen.add(x))]
+
+        if len(SERVICIOS_DC) == 1:
+            carrera = SERVICIOS_DC[0]
+            st.info(f"Acceso a:\n**{_display_servicio(carrera)}**")
+        else:
+            default_idx = 0
+            prev = st.session_state.get("carrera_seleccionada_dc")
+            if prev:
+                prev = _normalize_servicio_asignado(prev)
+            if prev and prev in SERVICIOS_DC:
+                default_idx = SERVICIOS_DC.index(prev)
+
+            carrera = st.selectbox(
+                "Servicio/Carrera",
+                SERVICIOS_DC,
+                index=default_idx,
+                format_func=_display_servicio,
+            )
+            st.session_state["carrera_seleccionada_dc"] = carrera
+            st.caption("Acceso limitado a tus servicios asignados.")
+
+        st.divider()
+
+    # ============================================================
+    # Menú de apartados (Plan anual) - FILTRADO por MODULOS
+    # ============================================================
+    SECCIONES_TODAS = [
+        "Encuesta de calidad",
+        "Observación de clases",
+        "Evaluación docente",
+        "Capacitaciones",
+        "Índice de reprobación",
+        "Titulación",
+        "Ceneval",
+        "Exámenes departamentales",
+        "Aulas virtuales",
+        "Bajas / Retención",
+        "Seguimiento de Inscripciones",
+    ]
+
+    try:
+        if st.session_state.get("user_allow_all", False):
+            SECCIONES = SECCIONES_TODAS[:]
+        else:
+            permitted = st.session_state.get("user_modulos", set())
+            SECCIONES = [s for s in SECCIONES_TODAS if MOD_KEY_BY_SECCION.get(s, "") in permitted]
+
+        if not SECCIONES:
+            st.error("Sin módulos habilitados.")
+            st.stop()
+    except Exception:
+        st.error("Error al filtrar módulos por permisos.")
+        _show_traceback_expander()
+        st.stop()
+
+    # Mantener seccion_forzada
+    if "seccion_forzada" in st.session_state:
+        forced = st.session_state.get("seccion_forzada")
+        st.session_state.pop("seccion_forzada", None)
+        idx_forzada = SECCIONES.index(forced) if forced in SECCIONES else 0
+    else:
+        idx_forzada = 0
+
+    seccion = st.selectbox(
+        "Apartado del plan anual",
+        SECCIONES,
+        index=idx_forzada,
+    )
+
+# Normaliza carrera
+if isinstance(carrera, str):
+    carrera = carrera.strip()
+
+# Nota catálogo (no bloqueante)
 if df_cat_carreras.empty:
     st.caption(
         "Nota: CAT_CARRERAS aún no está disponible o no se pudo cargar "
         "(esto no bloquea la app)."
     )
-
-# ============================================================
-# Contexto de usuario (DG vs DC vs DF)
-# ============================================================
-ROL = st.session_state["user_rol"]
-
-if ROL == "DG":
-    vista = "Dirección General"
-    carrera = None
-
-elif ROL == "DF":
-    vista = "Dirección Finanzas"
-    carrera = None
-
-else:
-    vista = "Director de carrera"
-    SERVICIOS_DC = st.session_state.get("user_servicios") or []
-
-    if isinstance(SERVICIOS_DC, str):
-        SERVICIOS_DC = [SERVICIOS_DC] if SERVICIOS_DC.strip() else []
-
-    SERVICIOS_DC = [_normalize_servicio_asignado(s) for s in SERVICIOS_DC]
-    SERVICIOS_DC = [s for s in SERVICIOS_DC if s]
-
-    seen = set()
-    SERVICIOS_DC = [x for x in SERVICIOS_DC if not (x in seen or seen.add(x))]
-
-    if len(SERVICIOS_DC) == 1:
-        carrera = SERVICIOS_DC[0]
-        st.info(f"Acceso limitado a: **{_display_servicio(carrera)}**")
-    else:
-        default_idx = 0
-        prev = st.session_state.get("carrera_seleccionada_dc")
-        if prev:
-            prev = _normalize_servicio_asignado(prev)
-        if prev and prev in SERVICIOS_DC:
-            default_idx = SERVICIOS_DC.index(prev)
-
-        carrera = st.selectbox(
-            "Selecciona el servicio/carrera:",
-            SERVICIOS_DC,
-            index=default_idx,
-            format_func=_display_servicio,
-        )
-        st.session_state["carrera_seleccionada_dc"] = carrera
-        st.caption("Acceso limitado a tus servicios asignados.")
-
-if isinstance(carrera, str):
-    carrera = carrera.strip()
-
-st.divider()
-
-# ============================================================
-# Menú de apartados (Plan anual) - FILTRADO por MODULOS
-# ============================================================
-SECCIONES_TODAS = [
-    "Encuesta de calidad",
-    "Observación de clases",
-    "Evaluación docente",
-    "Capacitaciones",
-    "Índice de reprobación",
-    "Titulación",
-    "Ceneval",
-    "Exámenes departamentales",
-    "Aulas virtuales",
-    "Bajas / Retención",
-    "Seguimiento de Inscripciones",  # ✅ NUEVO
-]
-
-try:
-    if st.session_state.get("user_allow_all", False):
-        SECCIONES = SECCIONES_TODAS[:]
-    else:
-        permitted = st.session_state.get("user_modulos", set())
-        SECCIONES = [s for s in SECCIONES_TODAS if MOD_KEY_BY_SECCION.get(s, "") in permitted]
-
-    if not SECCIONES:
-        st.error("Tu usuario no tiene módulos habilitados. Revisa la columna MODULOS en ACCESOS.")
-        st.stop()
-except Exception as e:
-    st.error("Error al filtrar módulos por permisos.")
-    if DEBUG:
-        st.exception(e)
-    else:
-        _show_traceback_expander()
-    st.stop()
-
-if "seccion_forzada" in st.session_state:
-    forced = st.session_state.get("seccion_forzada")
-    st.session_state.pop("seccion_forzada", None)
-    idx_forzada = SECCIONES.index(forced) if forced in SECCIONES else 0
-else:
-    idx_forzada = 0
-
-try:
-    seccion = st.selectbox(
-        "Selecciona el apartado del plan anual que deseas revisar:",
-        SECCIONES,
-        index=idx_forzada,
-    )
-except Exception as e:
-    st.error("Error creando selector de apartado.")
-    if DEBUG:
-        st.exception(e)
-    else:
-        _show_traceback_expander()
-    st.stop()
 
 st.divider()
 
@@ -659,16 +661,13 @@ try:
         if key not in st.session_state.get("user_modulos", set()):
             st.error("Sin acceso a este módulo.")
             st.stop()
-except Exception as e:
+except Exception:
     st.error("Error validando permisos del módulo.")
-    if DEBUG:
-        st.exception(e)
-    else:
-        _show_traceback_expander()
+    _show_traceback_expander()
     st.stop()
 
 # ============================================================
-# Router
+# Router (igual que antes)
 # ============================================================
 try:
     if seccion == "Encuesta de calidad":
@@ -710,12 +709,9 @@ try:
                 aulas_virtuales.mostrar(vista=vista, carrera=carrera_forzada)
             else:
                 aulas_virtuales.mostrar(vista=vista, carrera=carrera)
-        except Exception as e:
+        except Exception:
             st.error("Error al cargar Aulas virtuales.")
-            if DEBUG:
-                st.exception(e)
-            else:
-                _show_traceback_expander("Detalle técnico Aulas virtuales (diagnóstico)")
+            _show_traceback_expander("Detalle técnico Aulas virtuales (diagnóstico)")
             st.stop()
 
     elif seccion == "Bajas / Retención":
@@ -750,10 +746,10 @@ try:
         st.write(f"Vista actual: **{vista}**")
         st.write(f"Apartado seleccionado: **{seccion}**")
 
-except Exception as e:
+except Exception:
     st.error("Ocurrió un error al cargar el apartado seleccionado.")
     if DEBUG:
-        st.exception(e)
+        st.exception(Exception)
     else:
         _show_traceback_expander()
     st.stop()
