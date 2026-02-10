@@ -1,0 +1,12 @@
+# seguimiento_inscripciones.py
+import streamlit as st
+
+st.title("Seguimiento de Inscripciones")
+st.info("Módulo en construcción: Metas (Finanzas) vs Inscripciones (Admisiones) vs Activos.")
+
+st.markdown("""
+**Objetivo del módulo**
+- Cargar metas de inscripciones (Finanzas)
+- Comparar contra inscripciones registradas (Admisiones)
+- Comparar contra inscripciones activas (estatus vigente)
+""")
