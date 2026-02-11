@@ -4,6 +4,8 @@ import streamlit as st
 import altair as alt
 import gspread
 import textwrap
+import re
+from collections import Counter
 
 # ============================================================
 # Etiquetas de secciones (fallback si Mapa_Preguntas no trae section_name)
@@ -44,6 +46,27 @@ SHEET_PROCESADO_DEFAULT = "PROCESADO"        # DG / DC
 SHEET_PROCESADO_DF = "VISTA_FINANZAS_NUM"    # DF (ya numérica, con encabezados “humanos”)
 SHEET_MAPA = "Mapa_Preguntas"
 SHEET_CATALOGO = "Catalogo_Servicio"  # opcional
+
+
+# ============================================================
+# Stopwords básicas ES (ligeras, sin librerías)
+# ============================================================
+STOPWORDS_ES = set("""
+a al algo algunas algunos ante antes como con contra cual cuales cuando de del desde donde dos el ella ellas
+ellos en entre era erais eran eras eres es esa esas ese eso esos esta estaba estabais estaban estabas
+estad estada estadas estado estados estais estamos estan estar estara estaran estaras estare estareis
+estaremos estaria estarian estarias estariais estariamos estarias este esto estos estoy estuve estuvimos
+estuvieron estuviste estuvisteis estuviéramos estuviéramos fui fuimos fueron fuiste fuisteis ha habeis
+habia habiais habian habias habida habidas habido habidos habiendo hablan hablas hable hableis hablemos
+habra habran habras habre habreis habremos habria habrian habrias habeis habia han has hasta hay haya
+hayan hayas he hemos hice hicimos hicieron hiciste hicisteis id la las le les lo los mas me mi mia mias
+mio mios mis mucha muchas mucho muchos muy nada ni no nos nosotras nosotros nuestra nuestras nuestro
+nuestros o os otra otras otro otros para pero poca pocas poco pocos por porque que quien quienes se sea
+sean seas sera seran seras sere sereis seremos seria serian serias si sido siempre siendo sin sobre sois
+solamente solo somos son soy su sus suya suyas suyo suyos tambien te teneis tenemos tener tenga tengan
+tengas tengo tenia teniais tenian tenias tenido teniendo tenia tiene tienen tienes toda todas todo todos
+tu tus un una unas uno unos usted ustedes va vais vamos van vaya vayan vayas voy y ya
+""".split())
 
 
 # ============================================================
@@ -254,6 +277,162 @@ def _auto_classify_numcols(df: pd.DataFrame, cols: list[str]) -> tuple[list[str]
     return likert_cols, yesno_cols
 
 
+def _normalize_text(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _tokenize_es(s: str, min_len: int = 3) -> list[str]:
+    s = _normalize_text(s)
+    s = re.sub(r"[^\wáéíóúüñ]+", " ", s, flags=re.IGNORECASE)
+    toks = [t for t in s.split() if len(t) >= min_len and t not in STOPWORDS_ES]
+    return toks
+
+
+def _render_comentarios(
+    df_in: pd.DataFrame,
+    open_cols: list[str],
+    fecha_col: str | None,
+    carrera_col: str | None,
+    title: str = "Comentarios y respuestas abiertas",
+):
+    st.markdown(f"### {title}")
+
+    if not open_cols:
+        st.info("No se detectaron columnas de comentarios con la heurística actual.")
+        return
+
+    # Controles
+    c1, c2, c3 = st.columns([2.4, 1.2, 1.4])
+    with c1:
+        col_sel = st.selectbox("Campo abierto", open_cols)
+    with c2:
+        min_chars = st.number_input("Mín. caracteres", min_value=0, max_value=500, value=10, step=5)
+    with c3:
+        mode = st.selectbox("Modo búsqueda", ["Contiene", "Regex"], index=0)
+
+    c4, c5, c6 = st.columns([2.2, 1.2, 1.6])
+    with c4:
+        query = st.text_input("Buscar (palabra/frase)", value="")
+    with c5:
+        require_all = st.checkbox("Todas las palabras", value=False)
+    with c6:
+        show_n = st.number_input("Mostrar N", min_value=10, max_value=2000, value=300, step=50)
+
+    # Preparar textos
+    s = df_in[col_sel].dropna().astype(str)
+    s = s[s.str.strip() != ""]
+    base = df_in.loc[s.index].copy()
+    base["_texto"] = s
+
+    # Filtro por longitud
+    if min_chars and min_chars > 0:
+        base = base[base["_texto"].astype(str).str.len() >= int(min_chars)]
+
+    # Filtro por búsqueda
+    q = (query or "").strip()
+    if q:
+        if mode == "Regex":
+            try:
+                rx = re.compile(q, flags=re.IGNORECASE)
+                base = base[base["_texto"].astype(str).apply(lambda x: bool(rx.search(x)))]
+            except re.error:
+                st.warning("Regex inválida. Cambia a modo 'Contiene' o corrige tu patrón.")
+        else:
+            if require_all:
+                parts = [p for p in re.split(r"\s+", q) if p]
+                mask = True
+                for p in parts:
+                    mask = mask & base["_texto"].str.contains(re.escape(p), case=False, na=False)
+                base = base[mask]
+            else:
+                base = base[base["_texto"].str.contains(q, case=False, na=False)]
+
+    total = len(base)
+    st.caption(f"Entradas con texto (filtradas): **{total}**")
+    if total == 0:
+        st.info("No hay comentarios con los filtros actuales.")
+        return
+
+    # Ordenar por fecha si existe, si no, dejar como está
+    if fecha_col and fecha_col in base.columns and pd.api.types.is_datetime64_any_dtype(base[fecha_col]):
+        base = base.sort_values(fecha_col, ascending=False)
+
+    # Resumen rápido
+    with st.expander("Resumen del texto (rápido)", expanded=True):
+        texts = base["_texto"].astype(str).tolist()
+        lens = [len(t) for t in texts]
+        cA, cB, cC, cD = st.columns(4)
+        cA.metric("Comentarios", f"{len(texts)}")
+        cB.metric("Longitud promedio", f"{(sum(lens)/len(lens)):.0f}" if lens else "—")
+        cC.metric("Mediana", f"{pd.Series(lens).median():.0f}" if lens else "—")
+        cD.metric("Máximo", f"{max(lens)}" if lens else "—")
+
+        # Top palabras
+        toks = []
+        for t in texts:
+            toks.extend(_tokenize_es(t, min_len=3))
+        cnt = Counter(toks)
+        top = cnt.most_common(30)
+        if top:
+            top_df = pd.DataFrame(top, columns=["Palabra", "Frecuencia"])
+            st.dataframe(top_df, use_container_width=True, height=360)
+
+            ch = (
+                alt.Chart(top_df.head(20))
+                .mark_bar()
+                .encode(
+                    y=alt.Y("Palabra:N", sort="-x", title=None),
+                    x=alt.X("Frecuencia:Q", title="Frecuencia"),
+                    tooltip=["Palabra", "Frecuencia"],
+                )
+                .properties(height=420)
+            )
+            st.altair_chart(ch, use_container_width=True)
+        else:
+            st.info("No se pudieron extraer palabras (revisa stopwords / longitud mínima).")
+
+    # Resumen por carrera/servicio si existe
+    if carrera_col and carrera_col in base.columns:
+        with st.expander("Resumen por Carrera/Servicio", expanded=False):
+            tmp = base.copy()
+            tmp["_len"] = tmp["_texto"].astype(str).str.len()
+            grp = (
+                tmp.groupby(carrera_col, dropna=False)
+                .agg(Comentarios=("_texto", "count"), Longitud_prom=("_len", "mean"))
+                .reset_index()
+            )
+            grp[carrera_col] = grp[carrera_col].astype(str).str.strip()
+            grp["Longitud_prom"] = grp["Longitud_prom"].round(0).astype(int)
+            grp = grp.sort_values("Comentarios", ascending=False)
+            st.dataframe(grp, use_container_width=True)
+
+    # Tabla detalle (limitada)
+    st.divider()
+    st.markdown("#### Detalle (tabla)")
+    show = base.copy()
+    cols_to_show = []
+    if fecha_col and fecha_col in show.columns:
+        cols_to_show.append(fecha_col)
+    if carrera_col and carrera_col in show.columns:
+        cols_to_show.append(carrera_col)
+    cols_to_show.append("_texto")
+
+    show = show[cols_to_show].rename(columns={"_texto": col_sel})
+    st.dataframe(show.head(int(show_n)), use_container_width=True, height=520)
+
+    # Descarga CSV
+    csv = show.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Descargar CSV (comentarios filtrados)",
+        data=csv,
+        file_name=f"comentarios_{re.sub(r'[^a-zA-Z0-9]+','_', col_sel)[:40]}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 # ============================================================
 # Carga desde Google Sheets (por URL según modalidad)
 # ============================================================
@@ -367,7 +546,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
-    # Validación mapa (se usa siempre; DG/DC para secciones, DF para etiquetas/orden si aplica)
+    # Validación mapa
     # ---------------------------
     required_cols = {"header_exacto", "scale_code", "header_num"}
     if not required_cols.issubset(set(mapa.columns)):
@@ -394,7 +573,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     )
 
     # ---------------------------
-    # Filtros: Año + Carrera/Servicio (DG y DF) / Carrera fija (DC)
+    # Filtros: Año + Carrera/Servicio
     # ---------------------------
     years = ["(Todos)"]
     if fecha_col and df[fecha_col].notna().any():
@@ -413,7 +592,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         with c2:
             year_sel = st.selectbox("Año", years, index=0)
         with c3:
-            # Para DF: normalmente NO viene carrera fija desde app.py (pero soportamos si llega)
             if carrera_param_fija:
                 carrera_sel = str(carrera).strip()
                 st.text_input("Carrera/Servicio (fijo por selección superior)", value=carrera_sel, disabled=True)
@@ -463,7 +641,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
             if carrera_col and carrera_sel != "(Todas)":
                 f = f[f[carrera_col].astype(str).str.strip() == str(carrera_sel).strip()]
     else:
-        # Director de carrera: filtrar por carrera (si no es prepa)
         if modalidad != "Preparatoria":
             candidates = [c for c in ["Carrera_Catalogo", "Servicio", "Servicio de procedencia", "Selecciona el programa académico que estudias"] if c in f.columns]
             if not candidates:
@@ -496,7 +673,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
             st.dataframe(df.head(30), use_container_width=True)
             return
 
-        # Clasificación Likert vs Sí/No por rango real
+        # Clasificación Likert vs Sí/No
         likert_cols, yesno_cols = _auto_classify_numcols(df, num_cols)
 
         # Tabs
@@ -702,8 +879,8 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     "solo se usa si viene fijo desde el selector superior)."
                 )
 
-                carrera_col = _best_carrera_col(f)
-                if not carrera_col:
+                carrera_col2 = _best_carrera_col(f)
+                if not carrera_col2:
                     st.warning("No se encontró una columna válida para identificar Carrera/Servicio en PROCESADO.")
                 else:
                     if carrera_param_fija:
@@ -715,7 +892,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                                 continue
 
                             rows = []
-                            for carrera_val, df_c in f.groupby(carrera_col):
+                            for carrera_val, df_c in f.groupby(carrera_col2):
                                 vals = pd.to_numeric(df_c[cols].stack(), errors="coerce")
                                 mean_val = vals.mean()
                                 if pd.isna(mean_val):
@@ -761,11 +938,9 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                                     st.altair_chart(chart, use_container_width=True)
 
         # ---------------------------
-        # Comentarios (DG/DC)
+        # Comentarios (DG/DC) — MEJORADOS
         # ---------------------------
         with tab3:
-            st.markdown("### Comentarios y respuestas abiertas")
-
             open_cols = [
                 c
                 for c in f.columns
@@ -773,35 +948,30 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                 and any(k in str(c).lower() for k in ["¿por qué", "comentario", "sugerencia", "escríbelo", "escribelo", "descr"])
             ]
 
-            if not open_cols:
-                st.info("No detecté columnas de comentarios con la heurística actual.")
-                return
-
-            col_sel = st.selectbox("Selecciona el campo a revisar", open_cols)
-            textos = f[col_sel].dropna().astype(str)
-            textos = textos[textos.str.strip() != ""]
-
-            st.caption(f"Entradas con texto: {len(textos)}")
-            st.dataframe(pd.DataFrame({col_sel: textos}), use_container_width=True)
+            carrera_col3 = _best_carrera_col(f)
+            _render_comentarios(
+                df_in=f,
+                open_cols=open_cols,
+                fecha_col=fecha_col,
+                carrera_col=carrera_col3,
+                title="Comentarios y respuestas abiertas (mejorado)",
+            )
 
         return
 
     # =========================================================
     # CAMINO DF (Dirección Finanzas): sin *_num; columnas “humanas” ya numéricas
     # =========================================================
-    # Detectar columnas abiertas (comentarios/por qué)
     open_cols_df = [
         c for c in f.columns
         if any(k in str(c).lower() for k in ["¿por qué", "por qué", "comentario", "sugerencia", "escríbelo", "escribelo"])
     ]
 
-    # Excluir metadatos obvios
     base_exclude = set()
     for c in ["Marca temporal", "Marca Temporal", "Dirección de correo electrónico"]:
         if c in f.columns:
             base_exclude.add(c)
 
-    # Columnas numéricas candidatas: todo lo que tenga números (y no sea abierta/metadato)
     num_candidates = []
     for c in f.columns:
         if c in base_exclude:
@@ -940,18 +1110,14 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
             st.altair_chart(ch, use_container_width=True)
 
     # ---------------------------
-    # Comentarios (DF)
+    # Comentarios (DF) — MEJORADOS
     # ---------------------------
     with tab3:
-        st.markdown("### Comentarios y respuestas abiertas")
-
-        if not open_cols_df:
-            st.info("No se detectaron columnas de comentarios para esta vista.")
-            return
-
-        col_sel = st.selectbox("Selecciona el campo a revisar", open_cols_df)
-        textos = f[col_sel].dropna().astype(str)
-        textos = textos[textos.str.strip() != ""]
-
-        st.caption(f"Entradas con texto: {len(textos)}")
-        st.dataframe(pd.DataFrame({col_sel: textos}), use_container_width=True)
+        carrera_col_df = _best_carrera_col(f)
+        _render_comentarios(
+            df_in=f,
+            open_cols=open_cols_df,
+            fecha_col=fecha_col,
+            carrera_col=carrera_col_df,
+            title="Comentarios y respuestas abiertas (mejorado)",
+        )
