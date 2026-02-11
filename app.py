@@ -190,25 +190,9 @@ def _placeholder_en_construccion(titulo: str):
             st.button("🧑‍🏫 Aulas virtuales", use_container_width=True, disabled=True, key=f"btn_av_dis_{titulo}")
 
 
-def _get_logged_in_email() -> str:
-    """
-    Obtiene el email desde st.user (OIDC).
-    Se mantiene defensivo por si cambian atributos disponibles.
-    """
-    try:
-        email = getattr(st.user, "email", None)
-        if email:
-            return _norm_email(email)
-        d = st.user.to_dict() if hasattr(st.user, "to_dict") else {}
-        return _norm_email(d.get("email") or d.get("mail") or d.get("preferred_username") or "")
-    except Exception:
-        return ""
-
-
 def _show_traceback_expander(title: str = "Ver detalle técnico (diagnóstico)"):
     """Muestra el traceback completo en un expander (sin depender de DEBUG)."""
     import traceback
-
     with st.expander(title):
         st.code(traceback.format_exc())
 
@@ -242,10 +226,6 @@ UNIDAD_ID_LABEL = {
 
 
 def _normalize_servicio_asignado(x: str) -> str:
-    """
-    Si el servicio asignado corresponde a unidad compactada (EDN/ECDG/EJEC o alias),
-    regresa el ID final. Si no, regresa el texto original (trim).
-    """
     raw = str(x or "").strip()
     if not raw:
         return ""
@@ -256,10 +236,6 @@ def _normalize_servicio_asignado(x: str) -> str:
 
 
 def _display_servicio(x: str) -> str:
-    """
-    Para selectores (DC): si es unidad compactada, muestra etiqueta ejecutiva.
-    Si no, muestra el nombre tal cual.
-    """
     v = str(x or "").strip()
     if not v:
         return ""
@@ -283,10 +259,6 @@ def get_gspread_client():
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_cat_carreras_df():
-    """
-    Carga el catálogo maestro CAT_CARRERAS.
-    No detiene la app si falla (deja DF vacío), porque primero estabilizamos baseline.
-    """
     try:
         gc = get_gspread_client()
         return cargar_cat_carreras_desde_gsheets(gc)
@@ -295,7 +267,7 @@ def get_cat_carreras_df():
 
 
 # ============================================================
-# Lectura de ACCESOS (cacheada, pero forzamos lectura fresca al login con .clear())
+# Lectura de ACCESOS (cacheada)
 # ============================================================
 @st.cache_data(ttl=120, show_spinner=False)
 def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
@@ -364,7 +336,7 @@ def cargar_accesos_df() -> tuple[pd.DataFrame, str]:
 def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     email_norm = _norm_email(email)
     if not email_norm:
-        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "No fue posible obtener el correo del usuario autenticado."}
+        return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "Escribe un correo válido."}
 
     fila = df_accesos[df_accesos["EMAIL"] == email_norm]
     if fila.empty:
@@ -373,32 +345,26 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
             "rol": None,
             "servicios": [],
             "modulos": set(),
-            "mensaje": "Tu correo autenticado no está habilitado en ACCESOS (o está inactivo).",
+            "mensaje": "Tu correo no está habilitado en ACCESOS (o está inactivo).",
         }
 
     rol = str(fila.iloc[0]["ROL"]).strip().upper()
 
-    # 1) parse servicios
     servicios_raw = _parse_servicios_cell(fila.iloc[0].get("SERVICIO_ASIGNADO", ""))
-
-    # 2) normaliza compactadas a IDs finales (EDN/ECDG/EJEC)
     servicios = []
     for s in servicios_raw:
         s2 = _normalize_servicio_asignado(s)
         if s2:
             servicios.append(s2)
 
-    # dedupe (conserva orden)
     seen = set()
     servicios = [x for x in servicios if not (x in seen or seen.add(x))]
 
     modulos = _parse_modulos_cell(fila.iloc[0].get("MODULOS", ""))
 
-    # ✅ ACEPTA DG / DC / DF
     if rol not in ["DG", "DC", "DF"]:
         return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "ROL inválido en ACCESOS. Usa DG, DC o DF."}
 
-    # ✅ Solo DC requiere SERVICIO_ASIGNADO
     if rol == "DC" and not servicios:
         return {"ok": False, "rol": None, "servicios": [], "modulos": set(), "mensaje": "Falta SERVICIO_ASIGNADO (ROL=DC)."}
 
@@ -414,14 +380,14 @@ def resolver_permiso_por_email(email: str, df_accesos: pd.DataFrame) -> dict:
     return {
         "ok": True,
         "rol": rol,
-        "servicios": (servicios if rol == "DC" else []),  # ✅ DF no necesita servicios
+        "servicios": (servicios if rol == "DC" else []),
         "modulos": modulos,
         "mensaje": "OK",
     }
 
 
 # ============================================================
-# Header (logo + título) - se queda en el body
+# Header (logo + título)
 # ============================================================
 logo_url = "udl_logo.png"
 try:
@@ -439,59 +405,19 @@ except Exception as e:
 st.divider()
 
 # ============================================================
-# LOGIN / ACCESO (OIDC Google con st.login)
+# LOGIN LOCAL (SIN GOOGLE) — validación por ACCESOS
 # ============================================================
-try:
-    is_logged_in = bool(getattr(st.user, "is_logged_in", False))
-except Exception:
-    is_logged_in = False
-
-if not is_logged_in:
-    st.subheader("Acceso")
-    st.info("Inicia sesión con Google para acceder a la plataforma.")
-    if st.button("Iniciar sesión con Google", use_container_width=True):
-        st.login("google")
-    st.stop()
-
-# 2) Ya autenticado: obtener email y validar contra ACCESOS (solo una vez por sesión)
-if "user_rol" not in st.session_state:
-    user_email = _get_logged_in_email()
+def _validate_local_login(email_input: str):
+    email_norm = _norm_email(email_input)
+    if not email_norm:
+        return {"ok": False, "mensaje": "Escribe un correo válido."}
 
     try:
         cargar_accesos_df.clear()
         df_accesos, _ = cargar_accesos_df()
-        res = resolver_permiso_por_email(user_email, df_accesos)
-
-        if not res["ok"]:
-            st.subheader("Acceso")
-            st.error(res["mensaje"])
-            st.caption(f"Correo autenticado: {user_email or '(no disponible)'}")
-
-            if st.button("Cerrar sesión", use_container_width=True):
-                try:
-                    st.logout()
-                except Exception:
-                    pass
-                for k in [
-                    "user_email",
-                    "user_rol",
-                    "user_servicios",
-                    "user_modulos",
-                    "user_allow_all",
-                    "carrera_seleccionada_dc",
-                ]:
-                    st.session_state.pop(k, None)
-                st.rerun()
-            st.stop()
-
-        st.session_state["user_email"] = user_email
-        st.session_state["user_rol"] = res["rol"]
-        st.session_state["user_servicios"] = res["servicios"]
-        st.session_state["user_modulos"] = res["modulos"]
-        st.session_state["user_allow_all"] = ("ALL" in res["modulos"])
-        st.session_state.pop("carrera_seleccionada_dc", None)
-
-    except Exception as e:
+        res = resolver_permiso_por_email(email_norm, df_accesos)
+        return res
+    except Exception:
         st.error("No fue posible validar el acceso en ACCESOS. Revisa permisos del Google Sheet.")
         try:
             sa_email = _load_creds_dict().get("client_email", "")
@@ -499,12 +425,36 @@ if "user_rol" not in st.session_state:
             sa_email = ""
         if sa_email:
             st.info(f"Comparte el Sheet de ACCESOS con este correo (Viewer): {sa_email}")
+        _show_traceback_expander()
+        return {"ok": False, "mensaje": "Error validando acceso."}
 
-        if DEBUG:
-            st.exception(e)
-        else:
-            _show_traceback_expander()
+
+if "user_rol" not in st.session_state:
+    st.subheader("Acceso (Laboratorio)")
+    st.info("Ingresa tu correo para validar permisos contra la hoja ACCESOS (sin inicio de sesión Google).")
+
+    with st.form("login_local_form", clear_on_submit=False):
+        email_input = st.text_input("Correo", placeholder="tu_correo@udlondres.com")
+        submitted = st.form_submit_button("Entrar", use_container_width=True)
+
+    if not submitted:
         st.stop()
+
+    res = _validate_local_login(email_input)
+
+    if not res.get("ok"):
+        st.error(res.get("mensaje", "Acceso no autorizado."))
+        st.caption(f"Correo capturado: {email_input.strip() if email_input else '(vacío)'}")
+        st.stop()
+
+    st.session_state["user_email"] = _norm_email(email_input)
+    st.session_state["user_rol"] = res["rol"]
+    st.session_state["user_servicios"] = res["servicios"]
+    st.session_state["user_modulos"] = res["modulos"]
+    st.session_state["user_allow_all"] = ("ALL" in res["modulos"])
+    st.session_state.pop("carrera_seleccionada_dc", None)
+
+    st.rerun()
 
 # ============================================================
 # Catálogo maestro en memoria (disponible para módulos)
@@ -533,13 +483,8 @@ else:
 with st.sidebar:
     st.markdown("### Navegación")
 
-    # Estado sesión + salir (compacto)
     st.success(f"Sesión activa:\n{st.session_state.get('user_email','')}")
     if st.button("Salir", use_container_width=True):
-        try:
-            st.logout()
-        except Exception:
-            pass
         for k in [
             "user_email",
             "user_rol",
@@ -589,9 +534,7 @@ with st.sidebar:
 
         st.divider()
 
-    # ============================================================
     # Menú de apartados (Plan anual) - FILTRADO por MODULOS
-    # ============================================================
     SECCIONES_TODAS = [
         "Encuesta de calidad",
         "Observación de clases",
@@ -667,7 +610,7 @@ except Exception:
     st.stop()
 
 # ============================================================
-# Router (igual que antes)
+# Router
 # ============================================================
 try:
     if seccion == "Encuesta de calidad":
