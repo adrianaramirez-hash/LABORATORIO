@@ -5,6 +5,7 @@ import altair as alt
 import gspread
 import textwrap
 import re
+import unicodedata
 from collections import Counter
 
 # ============================================================
@@ -290,6 +291,37 @@ def _tokenize_es(s: str, min_len: int = 3) -> list[str]:
     return toks
 
 
+# ---------------------------
+# NUEVOS HELPERS (evidencia por driver)
+# ---------------------------
+def _strip_accents(s: str) -> str:
+    s = str(s or "")
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+
+def _parse_keywords(kw: str) -> list[str]:
+    if kw is None or (isinstance(kw, float) and pd.isna(kw)):
+        return []
+    parts = [p.strip() for p in str(kw).split("|") if p.strip()]
+    return parts
+
+
+def _match_keywords(text: str, keywords: list[str]) -> bool:
+    if not keywords:
+        return False
+    t = _strip_accents(str(text or "")).lower()
+    return any(k and (k.lower() in t) for k in keywords)
+
+
+def _modalidad_key(modalidad_ui: str) -> str:
+    # Claves esperadas en tu Mapa_Preguntas (según lo que nos compartiste)
+    if modalidad_ui == "Escolarizado / Ejecutivas":
+        return "ESCOLARIZADOS"
+    if modalidad_ui == "Preparatoria":
+        return "PREPA"
+    return "VIRTUAL"
+
+
 def _render_comentarios(
     df_in: pd.DataFrame,
     open_cols: list[str],
@@ -489,8 +521,8 @@ def _load_from_gsheets_by_url(url: str, sheet_procesado: str):
 # ============================================================
 def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None):
     """
-    DG/DC: usa PROCESADO + Mapa_Preguntas (comportamiento original).
-    DF: usa VISTA_FINANZAS_NUM (por modalidad) + Mapa_Preguntas, y mantiene filtros de modalidad y carrera.
+    DG/DC: usa PROCESADO + Mapa_Preguntas.
+    DF: usa VISTA_FINANZAS_NUM (por modalidad) + Mapa_Preguntas.
     """
     st.subheader("Encuesta de calidad")
 
@@ -537,7 +569,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         return
 
     if modalidad == "Preparatoria" and sheet_pro == SHEET_PROCESADO_DEFAULT:
-        # Solo aplica al pipeline original; DF ya trae sus columnas “humanas”
         df = _ensure_prepa_columns(df)
 
     # Fecha
@@ -546,31 +577,82 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
-    # Validación mapa
+    # Validación mapa (soporta 2 esquemas)
     # ---------------------------
-    required_cols = {"header_exacto", "scale_code", "header_num"}
-    if not required_cols.issubset(set(mapa.columns)):
-        st.error("La hoja 'Mapa_Preguntas' debe traer: header_exacto, scale_code, header_num.")
+    mapa = mapa.copy()
+
+    # Esquema NUEVO (tu mapa real): modalidad, header_raw, header_id, section_code, section_name, tipo, driver_name, keywords
+    schema_new = {"modalidad", "header_raw", "header_id", "section_code", "section_name", "tipo", "driver_name", "keywords"}
+    schema_old = {"header_exacto", "scale_code", "header_num"}
+
+    is_new = schema_new.issubset(set(mapa.columns))
+    is_old = schema_old.issubset(set(mapa.columns))
+
+    if not (is_new or is_old):
+        st.error(
+            "La hoja 'Mapa_Preguntas' no tiene el esquema esperado.\n\n"
+            "Esquema nuevo requerido: modalidad, header_raw, header_id, section_code, section_name, tipo, driver_name, keywords\n"
+            "o esquema viejo: header_exacto, scale_code, header_num."
+        )
+        st.dataframe(mapa.head(30), use_container_width=True)
         return
 
-    mapa = mapa.copy()
-    for c in ["header_exacto", "scale_code", "header_num"]:
-        if c in mapa.columns:
+    if is_new:
+        # Normalizar strings
+        for c in schema_new:
             mapa[c] = mapa[c].astype(str).str.strip()
 
-    mapa["section_code"] = mapa["header_num"].apply(_section_from_numcol)
+        # Para compatibilidad con el resto del módulo, creamos header_num a partir de header_id (patrón)
+        # ESC_DIR_01 -> DIR_ESC_01_num (para escolarizados), PRE/ VIRTUAL no siempre siguen patrón, así que:
+        # - si el patrón no existe, header_num queda vacío y se filtra por existencias.
+        def _derive_header_num_from_header_id(header_id: str) -> str | None:
+            parts = str(header_id).strip().split("_")
+            if len(parts) != 3:
+                return None
+            mod, sec, q = parts  # ESC, DIR, 01
+            candidate = f"{sec}_{mod}_{q}_num"
+            return candidate
 
-    if "section_name" in mapa.columns:
+        if "header_num" not in mapa.columns:
+            mapa["header_num"] = None
+
+        mapa["header_num"] = mapa["header_id"].apply(_derive_header_num_from_header_id)
+
+        # exists
+        mapa["exists"] = mapa["header_num"].isin(df.columns)
+
+        # Ya traes section_code y section_name
+        # (fallback adicional por si llegan vacíos)
+        mapa["section_code"] = mapa["section_code"].fillna("").astype(str).str.strip()
         mapa["section_name"] = mapa["section_name"].fillna("").astype(str).str.strip()
-        mapa.loc[mapa["section_name"] == "", "section_name"] = mapa["section_code"]
-    else:
-        mapa["section_name"] = mapa["section_code"]
+        mask_blank = mapa["section_name"] == ""
+        mapa.loc[mask_blank, "section_name"] = mapa.loc[mask_blank, "section_code"]
+        mask_abbrev = (mapa["section_name"] == mapa["section_code"]) | (mapa["section_name"].str.len() <= 4)
+        mapa.loc[mask_abbrev, "section_name"] = (
+            mapa.loc[mask_abbrev, "section_code"].map(SECTION_LABELS).fillna(mapa.loc[mask_abbrev, "section_code"])
+        )
 
-    mapa["section_name"] = mapa["section_name"].astype(str).str.strip()
-    mask_abbrev = (mapa["section_name"] == mapa["section_code"]) | (mapa["section_name"].str.len() <= 4)
-    mapa.loc[mask_abbrev, "section_name"] = (
-        mapa.loc[mask_abbrev, "section_code"].map(SECTION_LABELS).fillna(mapa.loc[mask_abbrev, "section_code"])
-    )
+    else:
+        # ESQUEMA VIEJO (tu código original)
+        for c in ["header_exacto", "scale_code", "header_num"]:
+            if c in mapa.columns:
+                mapa[c] = mapa[c].astype(str).str.strip()
+
+        mapa["section_code"] = mapa["header_num"].apply(_section_from_numcol)
+
+        if "section_name" in mapa.columns:
+            mapa["section_name"] = mapa["section_name"].fillna("").astype(str).str.strip()
+            mapa.loc[mapa["section_name"] == "", "section_name"] = mapa["section_code"]
+        else:
+            mapa["section_name"] = mapa["section_code"]
+
+        mapa["section_name"] = mapa["section_name"].astype(str).str.strip()
+        mask_abbrev = (mapa["section_name"] == mapa["section_code"]) | (mapa["section_name"].str.len() <= 4)
+        mapa.loc[mask_abbrev, "section_name"] = (
+            mapa.loc[mask_abbrev, "section_code"].map(SECTION_LABELS).fillna(mapa.loc[mask_abbrev, "section_code"])
+        )
+
+        mapa["exists"] = mapa["header_num"].isin(df.columns)
 
     # ---------------------------
     # Filtros: Año + Carrera/Servicio
@@ -630,7 +712,12 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
             if carrera_col:
                 f = f[f[carrera_col].astype(str).str.strip() == str(carrera_sel).strip()]
             else:
-                candidates = [c for c in ["Carrera_Catalogo", "Servicio", "Servicio de procedencia", "Selecciona el programa académico que estudias"] if c in f.columns]
+                candidates = [
+                    c for c in [
+                        "Carrera_Catalogo", "Servicio", "Servicio de procedencia",
+                        "Selecciona el programa académico que estudias"
+                    ] if c in f.columns
+                ]
                 if candidates:
                     target = str(carrera_sel).strip()
                     mask = False
@@ -642,7 +729,12 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                 f = f[f[carrera_col].astype(str).str.strip() == str(carrera_sel).strip()]
     else:
         if modalidad != "Preparatoria":
-            candidates = [c for c in ["Carrera_Catalogo", "Servicio", "Servicio de procedencia", "Selecciona el programa académico que estudias"] if c in f.columns]
+            candidates = [
+                c for c in [
+                    "Carrera_Catalogo", "Servicio", "Servicio de procedencia",
+                    "Selecciona el programa académico que estudias"
+                ] if c in f.columns
+            ]
             if not candidates:
                 st.warning("No encontré columnas para filtrar por carrera en esta modalidad.")
                 return
@@ -663,7 +755,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     # =========================================================
     if vista != "Dirección Finanzas":
         # Solo preguntas existentes (por header_num)
-        mapa["exists"] = mapa["header_num"].isin(df.columns)
         mapa_ok = mapa[mapa["exists"]].copy()
 
         # Columnas numéricas *_num
@@ -743,6 +834,9 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                 st.markdown("### Sí/No (por pregunta) — % Sí")
 
                 yn_rows = []
+                # En esquema nuevo no hay header_exacto; usamos header_raw como etiqueta
+                label_col = "header_raw" if is_new else "header_exacto"
+
                 for _, m in mapa_ok.iterrows():
                     col = m["header_num"]
                     if col not in yesno_cols or col not in f.columns:
@@ -750,7 +844,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     mean_val = _mean_numeric(f[col])
                     if pd.isna(mean_val):
                         continue
-                    yn_rows.append({"Pregunta": m["header_exacto"], "% Sí": float(mean_val) * 100})
+                    yn_rows.append({"Pregunta": m.get(label_col, col), "% Sí": float(mean_val) * 100})
 
                 yn_df = pd.DataFrame(yn_rows).sort_values("% Sí", ascending=False) if yn_rows else pd.DataFrame()
                 if not yn_df.empty:
@@ -772,100 +866,212 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                         st.altair_chart(yn_chart, use_container_width=True)
 
         # ---------------------------
-        # Por sección
+        # Por sección (MEJORADO con evidencia si hay esquema nuevo)
         # ---------------------------
         with tab2:
-            st.markdown("### Desglose por sección (preguntas)")
+            if is_new:
+                st.markdown("### Desglose por sección (drivers + evidencia)")
 
-            rows = []
-            for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
-                cols = [c for c in g["header_num"].tolist() if c in f.columns and c in likert_cols]
-                if not cols:
-                    continue
-                val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
-                if pd.isna(val):
-                    continue
-                rows.append({"Sección": sec_name, "Promedio": float(val), "Preguntas": len(cols), "sec_code": sec_code})
+                mod_key = _modalidad_key(modalidad)
+                mapa_mod = mapa[mapa["modalidad"].astype(str).str.upper() == mod_key].copy()
+                if mapa_mod.empty:
+                    st.warning(f"No hay filas en Mapa_Preguntas para modalidad: {mod_key}")
+                    return
 
-            if not rows and not yesno_cols:
-                st.info("No hay datos suficientes para mostrar secciones con los filtros actuales.")
-                return
+                # Solo num existentes
+                mapa_mod["exists"] = mapa_mod["header_num"].isin(df.columns)
+                mapa_ok2 = mapa_mod[mapa_mod["exists"]].copy()
 
-            sec_df2 = pd.DataFrame(rows).sort_values("Promedio", ascending=False) if rows else pd.DataFrame()
+                # Drivers = tipo LIKERT con columnas existentes
+                drivers_all = mapa_ok2[mapa_ok2["tipo"].astype(str).str.upper() == "LIKERT"].copy()
 
-            for _, r in sec_df2.iterrows():
-                sec_code = r["sec_code"]
-                sec_name = r["Sección"]
-                sec_avg = r["Promedio"]
+                # Abiertas por sección (todas)
+                mapa_abiertas = mapa_mod[mapa_mod["tipo"].astype(str).str.upper() == "ABIERTA"].copy()
 
-                with st.expander(f"{sec_name} — Promedio: {sec_avg:.2f}", expanded=False):
-                    mm = mapa_ok[mapa_ok["section_code"] == sec_code].copy()
-
-                    qrows = []
-                    for _, m in mm.iterrows():
-                        col = m["header_num"]
-                        if col not in f.columns:
+                def _collect_open_texts_for_section(df_f: pd.DataFrame, sec_code: str) -> pd.DataFrame:
+                    mm = mapa_abiertas[mapa_abiertas["section_code"] == sec_code].copy()
+                    if mm.empty:
+                        return pd.DataFrame(columns=["_texto", "_pregunta"])
+                    open_cols = [h for h in mm["header_raw"].tolist() if h in df_f.columns]
+                    if not open_cols:
+                        return pd.DataFrame(columns=["_texto", "_pregunta"])
+                    rows_local = []
+                    for col in open_cols:
+                        s = df_f[col].dropna().astype(str)
+                        s = s[s.str.strip() != ""]
+                        if s.empty:
                             continue
+                        tmp = pd.DataFrame({"_texto": s.values, "_pregunta": col})
+                        rows_local.append(tmp)
+                    if not rows_local:
+                        return pd.DataFrame(columns=["_texto", "_pregunta"])
+                    return pd.concat(rows_local, ignore_index=True)
 
-                        mean_val = _mean_numeric(f[col])
-                        if pd.isna(mean_val):
-                            continue
+                # Secciones disponibles
+                sec_df2 = (
+                    drivers_all[["section_code", "section_name"]]
+                    .drop_duplicates()
+                    .sort_values("section_name")
+                    .reset_index(drop=True)
+                )
 
-                        if col in yesno_cols:
-                            qrows.append({"Pregunta": m["header_exacto"], "% Sí": float(mean_val) * 100, "Tipo": "Sí/No"})
-                        elif col in likert_cols:
-                            qrows.append({"Pregunta": m["header_exacto"], "Promedio": float(mean_val), "Tipo": "Likert"})
+                if sec_df2.empty:
+                    st.info("No hay secciones LIKERT disponibles para esta modalidad con columnas numéricas existentes.")
+                    return
 
-                    qdf = pd.DataFrame(qrows)
-                    if qdf.empty:
-                        st.info("Sin datos para esta sección con los filtros actuales.")
+                for _, srow in sec_df2.iterrows():
+                    sec_code = srow["section_code"]
+                    sec_name = srow["section_name"]
+
+                    drivers = drivers_all[drivers_all["section_code"] == sec_code].copy()
+
+                    # Promedio sección (solo columnas num que existan y sean Likert)
+                    cols = [c for c in drivers["header_num"].tolist() if c in f.columns and c in likert_cols]
+                    if not cols:
+                        continue
+                    sec_avg = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
+                    if pd.isna(sec_avg):
                         continue
 
-                    qdf_l = qdf[qdf["Tipo"] == "Likert"].copy()
-                    if not qdf_l.empty:
-                        qdf_l = qdf_l.sort_values("Promedio", ascending=False)
-                        st.markdown("**Preguntas Likert (1–5)**")
-                        show_l = qdf_l[["Pregunta", "Promedio"]].reset_index(drop=True)
-                        st.dataframe(show_l, use_container_width=True)
+                    with st.expander(f"{sec_name} — Promedio sección: {float(sec_avg):.2f}", expanded=False):
+                        evidence_df = _collect_open_texts_for_section(f, sec_code)
+                        evidence_total = len(evidence_df)
 
-                        chart_l = _bar_chart_auto(
-                            df_in=show_l,
-                            category_col="Pregunta",
-                            value_col="Promedio",
-                            value_domain=[1, 5],
-                            value_title="Promedio",
-                            tooltip_cols=[alt.Tooltip("Promedio:Q", format=".2f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
-                            max_vertical=MAX_VERTICAL_QUESTIONS,
-                            wrap_width_vertical=24,
-                            wrap_width_horizontal=40,
-                            base_height=340,
-                            hide_category_labels=True,
-                        )
-                        if chart_l is not None:
-                            st.altair_chart(chart_l, use_container_width=True)
+                        for _, drow in drivers.iterrows():
+                            col_num = drow["header_num"]
+                            if col_num not in f.columns or col_num not in likert_cols:
+                                continue
 
-                    qdf_y = qdf[qdf["Tipo"] == "Sí/No"].copy()
-                    if not qdf_y.empty:
-                        qdf_y = qdf_y.sort_values("% Sí", ascending=False)
-                        st.markdown("**Preguntas Sí/No**")
-                        show_y = qdf_y[["Pregunta", "% Sí"]].reset_index(drop=True)
-                        st.dataframe(show_y, use_container_width=True)
+                            driver_label = drow.get("driver_name", col_num)
+                            kw_driver = _parse_keywords(drow.get("keywords", ""))
 
-                        chart_y = _bar_chart_auto(
-                            df_in=show_y,
-                            category_col="Pregunta",
-                            value_col="% Sí",
-                            value_domain=[0, 100],
-                            value_title="% Sí",
-                            tooltip_cols=[alt.Tooltip("% Sí:Q", format=".1f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
-                            max_vertical=MAX_VERTICAL_QUESTIONS,
-                            wrap_width_vertical=24,
-                            wrap_width_horizontal=40,
-                            base_height=340,
-                            hide_category_labels=True,
-                        )
-                        if chart_y is not None:
-                            st.altair_chart(chart_y, use_container_width=True)
+                            mean_val = _mean_numeric(f[col_num])
+                            if pd.isna(mean_val):
+                                continue
+
+                            cA, cB = st.columns([2.2, 1.0])
+                            with cA:
+                                st.markdown(f"**{driver_label}**")
+                                st.caption(f"`{col_num}`")
+                            with cB:
+                                st.metric("Promedio", f"{float(mean_val):.2f}")
+
+                            with st.expander("Evidencia (comentarios relacionados)", expanded=False):
+                                if evidence_total == 0:
+                                    st.info("No hay respuestas abiertas registradas para esta sección con los filtros actuales.")
+                                    continue
+
+                                if kw_driver:
+                                    mask = evidence_df["_texto"].apply(lambda t: _match_keywords(t, kw_driver))
+                                    hits = evidence_df[mask].copy()
+                                else:
+                                    hits = evidence_df.copy()
+
+                                st.caption(
+                                    f"Menciones encontradas: **{len(hits)}** de **{evidence_total}** textos abiertos en esta sección."
+                                )
+
+                                show_n = min(80, len(hits))
+                                for i in range(show_n):
+                                    row = hits.iloc[i]
+                                    st.markdown(f"- **[{row['_pregunta']}]** {row['_texto']}")
+                                if len(hits) > show_n:
+                                    st.caption(f"Mostrando {show_n} de {len(hits)} menciones.")
+
+                        st.caption("Tip: ajusta `keywords` en Mapa_Preguntas para afinar la evidencia por driver.")
+            else:
+                # === Tu comportamiento original (sin evidencia por keywords) ===
+                st.markdown("### Desglose por sección (preguntas)")
+
+                rows = []
+                for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
+                    cols = [c for c in g["header_num"].tolist() if c in f.columns and c in likert_cols]
+                    if not cols:
+                        continue
+                    val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
+                    if pd.isna(val):
+                        continue
+                    rows.append({"Sección": sec_name, "Promedio": float(val), "Preguntas": len(cols), "sec_code": sec_code})
+
+                if not rows and not yesno_cols:
+                    st.info("No hay datos suficientes para mostrar secciones con los filtros actuales.")
+                    return
+
+                sec_df2 = pd.DataFrame(rows).sort_values("Promedio", ascending=False) if rows else pd.DataFrame()
+
+                for _, r in sec_df2.iterrows():
+                    sec_code = r["sec_code"]
+                    sec_name = r["Sección"]
+                    sec_avg = r["Promedio"]
+
+                    with st.expander(f"{sec_name} — Promedio: {sec_avg:.2f}", expanded=False):
+                        mm = mapa_ok[mapa_ok["section_code"] == sec_code].copy()
+
+                        qrows = []
+                        for _, m in mm.iterrows():
+                            col = m["header_num"]
+                            if col not in f.columns:
+                                continue
+
+                            mean_val = _mean_numeric(f[col])
+                            if pd.isna(mean_val):
+                                continue
+
+                            if col in yesno_cols:
+                                qrows.append({"Pregunta": m["header_exacto"], "% Sí": float(mean_val) * 100, "Tipo": "Sí/No"})
+                            elif col in likert_cols:
+                                qrows.append({"Pregunta": m["header_exacto"], "Promedio": float(mean_val), "Tipo": "Likert"})
+
+                        qdf = pd.DataFrame(qrows)
+                        if qdf.empty:
+                            st.info("Sin datos para esta sección con los filtros actuales.")
+                            continue
+
+                        qdf_l = qdf[qdf["Tipo"] == "Likert"].copy()
+                        if not qdf_l.empty:
+                            qdf_l = qdf_l.sort_values("Promedio", ascending=False)
+                            st.markdown("**Preguntas Likert (1–5)**")
+                            show_l = qdf_l[["Pregunta", "Promedio"]].reset_index(drop=True)
+                            st.dataframe(show_l, use_container_width=True)
+
+                            chart_l = _bar_chart_auto(
+                                df_in=show_l,
+                                category_col="Pregunta",
+                                value_col="Promedio",
+                                value_domain=[1, 5],
+                                value_title="Promedio",
+                                tooltip_cols=[alt.Tooltip("Promedio:Q", format=".2f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
+                                max_vertical=MAX_VERTICAL_QUESTIONS,
+                                wrap_width_vertical=24,
+                                wrap_width_horizontal=40,
+                                base_height=340,
+                                hide_category_labels=True,
+                            )
+                            if chart_l is not None:
+                                st.altair_chart(chart_l, use_container_width=True)
+
+                        qdf_y = qdf[qdf["Tipo"] == "Sí/No"].copy()
+                        if not qdf_y.empty:
+                            qdf_y = qdf_y.sort_values("% Sí", ascending=False)
+                            st.markdown("**Preguntas Sí/No**")
+                            show_y = qdf_y[["Pregunta", "% Sí"]].reset_index(drop=True)
+                            st.dataframe(show_y, use_container_width=True)
+
+                            chart_y = _bar_chart_auto(
+                                df_in=show_y,
+                                category_col="Pregunta",
+                                value_col="% Sí",
+                                value_domain=[0, 100],
+                                value_title="% Sí",
+                                tooltip_cols=[alt.Tooltip("% Sí:Q", format=".1f"), alt.Tooltip("Pregunta:N", title="Pregunta")],
+                                max_vertical=MAX_VERTICAL_QUESTIONS,
+                                wrap_width_vertical=24,
+                                wrap_width_horizontal=40,
+                                base_height=340,
+                                hide_category_labels=True,
+                            )
+                            if chart_y is not None:
+                                st.altair_chart(chart_y, use_container_width=True)
 
         # ---------------------------
         # Comparativo entre carreras (solo DG)
@@ -938,7 +1144,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                                     st.altair_chart(chart, use_container_width=True)
 
         # ---------------------------
-        # Comentarios (DG/DC) — MEJORADOS
+        # Comentarios (DG/DC) — SIN CAMBIOS (por ahora)
         # ---------------------------
         with tab3:
             open_cols = [
@@ -1110,7 +1316,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
             st.altair_chart(ch, use_container_width=True)
 
     # ---------------------------
-    # Comentarios (DF) — MEJORADOS
+    # Comentarios (DF)
     # ---------------------------
     with tab3:
         carrera_col_df = _best_carrera_col(f)
