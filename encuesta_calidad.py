@@ -8,20 +8,20 @@ import re
 from collections import Counter
 
 # ============================================================
-# Etiquetas de secciones (fallback si el mapa no trae section_name)
+# Etiquetas de secciones (fallback)
 # ============================================================
 SECTION_LABELS = {
-    "DIR": "Director/Coordinador",
+    "DIR": "Director/Coordinación",
     "SER": "Servicios institucionales",
     "ADM": "Soporte administrativo",
     "ACD": "Servicios académicos",
     "APR": "Aprendizaje",
     "EVA": "Evaluación del conocimiento",
-    "SEAC": "Plataforma SEAC",
+    "SEAC": "Soporte académico (SEAC)",
     "PLAT": "Plataforma SEAC",
     "SAT": "Plataforma SEAC",
     "MAT": "Materiales",
-    "UDL": "Comunicación con la UDL",
+    "UDL": "Comunicación con UDL",
     "COM": "Comunicación con compañeros",
     "INS": "Instalaciones y equipo tecnológico",
     "AMB": "Ambiente escolar",
@@ -33,15 +33,15 @@ MAX_VERTICAL_QUESTIONS = 7
 MAX_VERTICAL_SECTIONS = 7
 
 # ============================================================
-# Nombres de pestañas por rol
+# Hojas
 # ============================================================
-SHEET_PROCESADO_DEFAULT = "PROCESADO"         # DG / DC
-SHEET_PROCESADO_DF = "VISTA_FINANZAS_NUM"     # DF (ya numérica, con encabezados “humanos”)
+SHEET_PROCESADO_DEFAULT = "PROCESADO"        # DG / DC
+SHEET_PROCESADO_DF = "VISTA_FINANZAS_NUM"    # DF (ya numérica, con encabezados “humanos”)
 SHEET_MAPA = "Mapa_Preguntas"
-SHEET_CATALOGO = "Catalogo_Servicio"          # opcional
+SHEET_CATALOGO = "Catalogo_Servicio"  # opcional
 
 # ============================================================
-# Stopwords básicas ES (ligeras, sin librerías)
+# Stopwords básicas ES
 # ============================================================
 STOPWORDS_ES = set("""
 a al algo algunas algunos ante antes como con contra cual cuales cuando de del desde donde dos el ella ellas
@@ -60,8 +60,9 @@ tengas tengo tenia teniais tenian tenias tenido teniendo tenia tiene tienen tien
 tu tus un una unas uno unos usted ustedes va vais vamos van vaya vayan vayas voy y ya
 """.split())
 
+
 # ============================================================
-# Helpers
+# Helpers base
 # ============================================================
 def _to_datetime_safe(s):
     return pd.to_datetime(s, errors="coerce", dayfirst=True)
@@ -81,74 +82,6 @@ def _wrap_text(s: str, width: int = 18, max_lines: int = 3) -> str:
 
 def _mean_numeric(series: pd.Series):
     return pd.to_numeric(series, errors="coerce").mean()
-
-def _bar_chart_auto(
-    df_in: pd.DataFrame,
-    category_col: str,
-    value_col: str,
-    value_domain: list,
-    value_title: str,
-    tooltip_cols: list,
-    max_vertical: int,
-    wrap_width_vertical: int = 18,
-    wrap_width_horizontal: int = 30,
-    height_per_row: int = 28,
-    base_height: int = 260,
-    hide_category_labels: bool = True,
-):
-    if df_in is None or df_in.empty:
-        return None
-
-    df = df_in.copy()
-    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
-    df = df.dropna(subset=[value_col])
-    if df.empty:
-        return None
-
-    n = len(df)
-
-    cat_axis_vertical = alt.Axis(
-        title=None,
-        labels=not hide_category_labels,
-        ticks=not hide_category_labels,
-        labelAngle=0,
-        labelLimit=0,
-    )
-    cat_axis_horizontal = alt.Axis(
-        title=None,
-        labels=not hide_category_labels,
-        ticks=not hide_category_labels,
-        labelLimit=0,
-    )
-
-    # Vertical
-    if n <= max_vertical:
-        df["_cat_wrapped"] = df[category_col].apply(lambda x: _wrap_text(x, width=wrap_width_vertical, max_lines=3))
-        return (
-            alt.Chart(df)
-            .mark_bar()
-            .encode(
-                x=alt.X("_cat_wrapped:N", sort=alt.SortField(field=value_col, order="descending"), axis=cat_axis_vertical),
-                y=alt.Y(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), axis=alt.Axis(title=value_title)),
-                tooltip=tooltip_cols,
-            )
-            .properties(height=max(320, base_height))
-        )
-
-    # Horizontal
-    df["_cat_wrapped"] = df[category_col].apply(lambda x: _wrap_text(x, width=wrap_width_horizontal, max_lines=3))
-    dynamic_height = max(base_height, n * height_per_row)
-
-    return (
-        alt.Chart(df)
-        .mark_bar()
-        .encode(
-            y=alt.Y("_cat_wrapped:N", sort=alt.SortField(field=value_col, order="descending"), axis=cat_axis_horizontal),
-            x=alt.X(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), axis=alt.Axis(title=value_title)),
-            tooltip=tooltip_cols,
-        )
-        .properties(height=dynamic_height)
-    )
 
 def _pick_fecha_col(df: pd.DataFrame):
     for c in ["Marca temporal", "Marca Temporal", "Fecha", "fecha", "timestamp", "Timestamp"]:
@@ -227,216 +160,79 @@ def _tokenize_es(s: str, min_len: int = 3) -> list[str]:
     toks = [t for t in s.split() if len(t) >= min_len and t not in STOPWORDS_ES]
     return toks
 
-def _safe_str(x) -> str:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    return str(x).strip()
-
-def _infer_col_from_map_row(m: pd.Series, df_cols: set[str]) -> str:
-    """
-    Resuelve la columna REAL en PROCESADO/VISTA_* a partir del mapa.
-    Soporta:
-      - header_num ya listo
-      - header_id tipo: ESC_DIR_01  -> intenta DIR_ESC_01_num, ESC_DIR_01_txt, etc.
-    """
-    # 1) Si header_num existe y está en df, úsalo
-    header_num = _safe_str(m.get("header_num"))
-    if header_num and header_num in df_cols:
-        return header_num
-
-    # 2) Si header_num existe pero no está, intenta usarlo como base (por si falta sufijo)
-    if header_num:
-        candidates = [header_num]
-        if not header_num.endswith(("_num", "_txt")):
-            candidates += [header_num + "_num", header_num + "_txt"]
-        for c in candidates:
-            if c in df_cols:
-                return c
-
-    # 3) Derivar desde header_id
-    header_id = _safe_str(m.get("header_id"))
-    if header_id:
-        parts = header_id.split("_")
-        # caso típico: MOD_SEC_01 (ESC_DIR_01)
-        if len(parts) >= 3:
-            mod = parts[0]
-            sec = parts[1]
-            num = "_".join(parts[2:])
-
-            # posibles (porque en tus datos hay inconsistencia: num= DIR_ESC_01_num y txt= ESC_DIR_05_txt)
-            candidates = [
-                f"{sec}_{mod}_{num}_num",
-                f"{sec}_{mod}_{num}_txt",
-                f"{mod}_{sec}_{num}_num",
-                f"{mod}_{sec}_{num}_txt",
-                f"{header_id}_num",
-                f"{header_id}_txt",
-            ]
-        else:
-            candidates = [header_id, f"{header_id}_num", f"{header_id}_txt"]
-
-        for c in candidates:
-            if c in df_cols:
-                return c
-
-    # 4) Último recurso: vacío
-    return ""
-
-def _normalize_scale_code(x: str) -> str:
-    s = _safe_str(x).upper()
-    s = s.replace("Á", "A").replace("É", "E").replace("Í", "I").replace("Ó", "O").replace("Ú", "U")
-    if "ABIERT" in s or "TEXTO" in s or "OPEN" in s:
-        return "ABIERTA"
-    if "YES" in s or "SINO" in s or "SI/NO" in s:
-        return "YESNO"
-    if "LIK" in s or "ESCALA" in s:
-        return "LIKERT"
-    return s or "OTR"
 
 # ============================================================
-# Comentarios (UI estética, sin IDs visibles)
+# Charts
 # ============================================================
-def _render_comentarios(
+def _bar_chart_auto(
     df_in: pd.DataFrame,
-    open_items: list[dict],
-    fecha_col: str | None,
-    carrera_col: str | None,
-    title: str = "Comentarios y respuestas abiertas",
+    category_col: str,
+    value_col: str,
+    value_domain: list,
+    value_title: str,
+    tooltip_cols: list,
+    max_vertical: int,
+    wrap_width_vertical: int = 18,
+    wrap_width_horizontal: int = 30,
+    height_per_row: int = 28,
+    base_height: int = 260,
+    hide_category_labels: bool = True,
 ):
-    st.markdown(f"### {title}")
+    if df_in is None or df_in.empty:
+        return None
 
-    if not open_items:
-        st.info("No se detectaron campos abiertos (comentarios/por qué/sugerencias).")
-        return
+    df = df_in.copy()
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=[value_col])
+    if df.empty:
+        return None
 
-    def _fmt_option(opt: dict) -> str:
-        sec = (opt.get("section") or "").strip()
-        drv = (opt.get("driver") or "").strip()
-        lab = (opt.get("label") or opt.get("col") or "").strip()
-        if sec and drv:
-            return f"{sec} · {drv} — {lab}"
-        if sec:
-            return f"{sec} — {lab}"
-        return lab
+    n = len(df)
 
-    c1, c2, c3 = st.columns([2.6, 1.2, 1.2])
-    with c1:
-        sel = st.selectbox("Campo abierto", options=open_items, format_func=_fmt_option)
-    with c2:
-        min_chars = st.number_input("Mín. caracteres", min_value=0, max_value=500, value=10, step=5)
-    with c3:
-        mode = st.selectbox("Búsqueda", ["Contiene", "Regex"], index=0)
-
-    c4, c5, c6 = st.columns([2.2, 1.2, 1.6])
-    with c4:
-        query = st.text_input("Buscar (palabra/frase)", value="")
-    with c5:
-        require_all = st.checkbox("Todas las palabras", value=False)
-    with c6:
-        show_n = st.number_input("Mostrar N", min_value=10, max_value=2000, value=200, step=50)
-
-    col_sel = sel.get("col")
-    label_sel = _fmt_option(sel)
-
-    if not col_sel or col_sel not in df_in.columns:
-        st.warning("El campo seleccionado no existe en los datos filtrados. Revisa el mapa y la hoja.")
-        return
-
-    s = df_in[col_sel].dropna().astype(str)
-    s = s[s.str.strip() != ""]
-    base = df_in.loc[s.index].copy()
-    base["_texto"] = s
-
-    if min_chars and min_chars > 0:
-        base = base[base["_texto"].astype(str).str.len() >= int(min_chars)]
-
-    q = (query or "").strip()
-    if q:
-        if mode == "Regex":
-            try:
-                rx = re.compile(q, flags=re.IGNORECASE)
-                base = base[base["_texto"].astype(str).apply(lambda x: bool(rx.search(x)))]
-            except re.error:
-                st.warning("Regex inválida. Cambia a 'Contiene' o corrige tu patrón.")
-        else:
-            if require_all:
-                parts = [p for p in re.split(r"\s+", q) if p]
-                mask = True
-                for p in parts:
-                    mask = mask & base["_texto"].str.contains(re.escape(p), case=False, na=False)
-                base = base[mask]
-            else:
-                base = base[base["_texto"].str.contains(q, case=False, na=False)]
-
-    total = len(base)
-    st.caption(f"Campo: **{label_sel}**  |  Comentarios filtrados: **{total}**")
-    if total == 0:
-        st.info("No hay comentarios con los filtros actuales.")
-        return
-
-    if fecha_col and fecha_col in base.columns and pd.api.types.is_datetime64_any_dtype(base[fecha_col]):
-        base = base.sort_values(fecha_col, ascending=False)
-
-    with st.expander("Resumen del texto", expanded=True):
-        texts = base["_texto"].astype(str).tolist()
-        lens = [len(t) for t in texts]
-
-        a, b, c, d = st.columns(4)
-        a.metric("Comentarios", f"{len(texts)}")
-        b.metric("Longitud promedio", f"{(sum(lens)/len(lens)):.0f}" if lens else "—")
-        c.metric("Mediana", f"{pd.Series(lens).median():.0f}" if lens else "—")
-        d.metric("Máximo", f"{max(lens)}" if lens else "—")
-
-        toks = []
-        for t in texts:
-            toks.extend(_tokenize_es(t, min_len=3))
-        cnt = Counter(toks)
-        top = cnt.most_common(20)
-
-        if top:
-            top_df = pd.DataFrame(top, columns=["Palabra", "Frecuencia"])
-            st.dataframe(top_df, use_container_width=True, height=300)
-        else:
-            st.info("No se pudieron extraer palabras relevantes con los filtros actuales.")
-
-    if carrera_col and carrera_col in base.columns:
-        with st.expander("Resumen por Carrera/Servicio", expanded=False):
-            tmp = base.copy()
-            tmp["_len"] = tmp["_texto"].astype(str).str.len()
-            grp = (
-                tmp.groupby(carrera_col, dropna=False)
-                .agg(Comentarios=("_texto", "count"), Longitud_prom=("_len", "mean"))
-                .reset_index()
-            )
-            grp[carrera_col] = grp[carrera_col].astype(str).str.strip()
-            grp["Longitud_prom"] = grp["Longitud_prom"].round(0).astype(int)
-            grp = grp.sort_values("Comentarios", ascending=False)
-            st.dataframe(grp, use_container_width=True)
-
-    st.divider()
-    st.markdown("#### Comentarios (detalle)")
-
-    cols_to_show = []
-    if fecha_col and fecha_col in base.columns:
-        cols_to_show.append(fecha_col)
-    if carrera_col and carrera_col in base.columns:
-        cols_to_show.append(carrera_col)
-    cols_to_show.append("_texto")
-
-    show = base[cols_to_show].rename(columns={"_texto": "Comentario"})
-    st.dataframe(show.head(int(show_n)), use_container_width=True, height=520)
-
-    csv = show.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Descargar CSV (comentarios filtrados)",
-        data=csv,
-        file_name="comentarios_filtrados.csv",
-        mime="text/csv",
-        use_container_width=True,
+    cat_axis_vertical = alt.Axis(
+        title=None,
+        labels=not hide_category_labels,
+        ticks=not hide_category_labels,
+        labelAngle=0,
+        labelLimit=0,
+    )
+    cat_axis_horizontal = alt.Axis(
+        title=None,
+        labels=not hide_category_labels,
+        ticks=not hide_category_labels,
+        labelLimit=0,
     )
 
+    if n <= max_vertical:
+        df["_cat_wrapped"] = df[category_col].apply(lambda x: _wrap_text(x, width=wrap_width_vertical, max_lines=3))
+        return (
+            alt.Chart(df)
+            .mark_bar()
+            .encode(
+                x=alt.X("_cat_wrapped:N", sort=alt.SortField(field=value_col, order="descending"), axis=cat_axis_vertical),
+                y=alt.Y(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), axis=alt.Axis(title=value_title)),
+                tooltip=tooltip_cols,
+            )
+            .properties(height=max(320, base_height))
+        )
+
+    df["_cat_wrapped"] = df[category_col].apply(lambda x: _wrap_text(x, width=wrap_width_horizontal, max_lines=3))
+    dynamic_height = max(base_height, n * height_per_row)
+
+    return (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            y=alt.Y("_cat_wrapped:N", sort=alt.SortField(field=value_col, order="descending"), axis=cat_axis_horizontal),
+            x=alt.X(f"{value_col}:Q", scale=alt.Scale(domain=value_domain), axis=alt.Axis(title=value_title)),
+            tooltip=tooltip_cols,
+        )
+        .properties(height=dynamic_height)
+    )
+
+
 # ============================================================
-# Carga desde Google Sheets (por URL según modalidad)
+# Google Sheets loader
 # ============================================================
 @st.cache_data(show_spinner=False, ttl=300)
 def _load_from_gsheets_by_url(url: str, sheet_procesado: str):
@@ -455,7 +251,7 @@ def _load_from_gsheets_by_url(url: str, sheet_procesado: str):
 
     ws_pro = resolve(sheet_procesado)
     ws_map = resolve(SHEET_MAPA)
-    ws_cat = resolve(SHEET_CATALOGO)
+    ws_cat = resolve(SHEET_CATALOGO)  # opcional
 
     missing = []
     if not ws_pro:
@@ -485,6 +281,413 @@ def _load_from_gsheets_by_url(url: str, sheet_procesado: str):
     catalogo = ws_to_df(ws_cat) if ws_cat else pd.DataFrame()
     return df, mapa, catalogo
 
+
+# ============================================================
+# Mapa "nuevo" -> resolver columnas reales del dataframe
+# Encabezado mapa esperado (tu caso):
+# modalidad, header_raw, header_id, section_code, section_name, tipo, escala_min, escala_max, driver_name, keywords
+# ============================================================
+def _clean_str(x) -> str:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return ""
+    return str(x).strip()
+
+def _parse_keywords_pipe(s: str) -> list[str]:
+    s = _clean_str(s)
+    if not s:
+        return []
+    parts = [p.strip().lower() for p in s.split("|") if p.strip()]
+    return parts
+
+def _resolve_col_from_header_id(df: pd.DataFrame, header_id: str, tipo: str) -> str | None:
+    """
+    Intenta mapear header_id del mapa a columna real en PROCESADO.
+    Casos cubiertos:
+    - Virtual: columnas ya vienen como header_id + _num (muchas ya incluyen _num en el propio nombre)
+    - Escolarizados/Prepa: a veces open usa ESC_DIR_05_txt y num usa DIR_ESC_01_num (swap tokens)
+    """
+    hid = _clean_str(header_id)
+    if not hid:
+        return None
+
+    tipo_u = _clean_str(tipo).upper()
+
+    # posibles sufijos
+    want_txt = tipo_u in ["ABIERTA", "ABIERTO", "OPEN", "TEXTO", "TEXT"]
+    suffixes = ["_txt"] if want_txt else ["_num"]
+
+    candidates = []
+
+    # 1) directo
+    for suf in suffixes:
+        candidates.append(f"{hid}{suf}")
+
+    # 2) si ya viene con sufijo incluido
+    candidates.append(hid)
+
+    # 3) swap tokens si viene ESC_DIR_01 -> DIR_ESC_01
+    parts = hid.split("_")
+    if len(parts) == 3:
+        a, b, c = parts
+        swapped = f"{b}_{a}_{c}"
+        for suf in suffixes:
+            candidates.append(f"{swapped}{suf}")
+        candidates.append(swapped)
+
+    # 4) algunos num en tu PROCESADO están como SECTION_MODALIDAD_XX_num (DIR_ESC_01_num)
+    # ya cubierto con swap. Para virtual suele ser tal cual.
+
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+def _prepare_mapa_nuevo(mapa: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    need = {"header_raw", "tipo", "section_code"}
+    if not need.issubset(set(mapa.columns)):
+        raise ValueError("La hoja 'Mapa_Preguntas' debe traer al menos: header_raw, tipo, section_code.")
+
+    m = mapa.copy()
+
+    # normalizar columnas clave
+    for c in ["modalidad", "header_raw", "header_id", "section_code", "section_name", "tipo", "driver_name", "keywords"]:
+        if c in m.columns:
+            m[c] = m[c].astype(str).map(_clean_str)
+
+    # section_name fallback
+    if "section_name" not in m.columns:
+        m["section_name"] = m["section_code"].map(SECTION_LABELS).fillna(m["section_code"])
+    else:
+        m["section_name"] = m["section_name"].where(m["section_name"] != "", m["section_code"])
+        m.loc[m["section_name"].str.len() <= 4, "section_name"] = (
+            m.loc[m["section_name"].str.len() <= 4, "section_code"].map(SECTION_LABELS).fillna(m["section_name"])
+        )
+
+    # resolver columna real por header_id si existe
+    if "header_id" in m.columns:
+        m["_col"] = m.apply(lambda r: _resolve_col_from_header_id(df, r.get("header_id", ""), r.get("tipo", "")), axis=1)
+    else:
+        m["_col"] = None
+
+    # fallback: si no hay header_id, intentar match por nombre exacto con header_raw (poco común)
+    m.loc[m["_col"].isna(), "_col"] = m.loc[m["_col"].isna(), "header_raw"].apply(lambda x: x if x in df.columns else None)
+
+    # exists
+    m["exists"] = m["_col"].notna()
+    return m
+
+
+# ============================================================
+# Comentarios "bonitos": selector por pregunta (texto humano)
+# ============================================================
+def _render_comentarios_bonitos(
+    f: pd.DataFrame,
+    mapa_ok: pd.DataFrame,
+    fecha_col: str | None,
+    carrera_col: str | None,
+    title: str = "Comentarios y respuestas abiertas",
+):
+    st.markdown(f"### {title}")
+
+    open_map = mapa_ok[mapa_ok["tipo"].str.upper().isin(["ABIERTA", "ABIERTO", "OPEN", "TEXTO", "TEXT"])].copy()
+    open_map = open_map[open_map["exists"]].copy()
+    if open_map.empty:
+        st.info("No hay preguntas abiertas disponibles (revisa mapa y columnas *_txt).")
+        return
+
+    # opciones: mostrar header_raw (humano) pero guardar _col (real)
+    options = []
+    for _, r in open_map.iterrows():
+        human = r["header_raw"]
+        sec = r.get("section_name", "")
+        if sec:
+            label = f"[{sec}] {human}"
+        else:
+            label = human
+        options.append((label, r["_col"], r.get("keywords", "")))
+
+    c1, c2, c3 = st.columns([2.6, 1.2, 1.4])
+    with c1:
+        label_sel = st.selectbox("Pregunta abierta", [o[0] for o in options])
+    with c2:
+        min_chars = st.number_input("Mín. caracteres", min_value=0, max_value=500, value=10, step=5)
+    with c3:
+        mode = st.selectbox("Modo búsqueda", ["Contiene", "Regex"], index=0)
+
+    col_sel = dict((o[0], o[1]) for o in options)[label_sel]
+    kw_default = dict((o[0], o[2]) for o in options).get(label_sel, "")
+
+    c4, c5, c6, c7 = st.columns([2.0, 1.0, 1.4, 1.6])
+    with c4:
+        query = st.text_input("Buscar (palabra/frase)", value="")
+    with c5:
+        require_all = st.checkbox("Todas las palabras", value=False)
+    with c6:
+        show_n = st.number_input("Mostrar N", min_value=10, max_value=2000, value=300, step=50)
+    with c7:
+        use_kw = st.checkbox("Usar keywords del mapa", value=False, help="Aplica el diccionario de keywords del mapa para filtrar automáticamente.")
+
+    # textos
+    s = f[col_sel].dropna().astype(str)
+    s = s[s.str.strip() != ""]
+    base = f.loc[s.index].copy()
+    base["_texto"] = s
+
+    if min_chars and min_chars > 0:
+        base = base[base["_texto"].astype(str).str.len() >= int(min_chars)]
+
+    # keywords dictionary
+    if use_kw and _clean_str(kw_default):
+        kws = _parse_keywords_pipe(kw_default)
+        if kws:
+            rx = re.compile(r"(" + "|".join([re.escape(k) for k in kws]) + r")", flags=re.IGNORECASE)
+            base = base[base["_texto"].astype(str).apply(lambda x: bool(rx.search(x)))]
+
+    # búsqueda manual
+    q = (query or "").strip()
+    if q:
+        if mode == "Regex":
+            try:
+                rx = re.compile(q, flags=re.IGNORECASE)
+                base = base[base["_texto"].astype(str).apply(lambda x: bool(rx.search(x)))]
+            except re.error:
+                st.warning("Regex inválida. Cambia a modo 'Contiene' o corrige tu patrón.")
+        else:
+            if require_all:
+                parts = [p for p in re.split(r"\s+", q) if p]
+                mask = True
+                for p in parts:
+                    mask = mask & base["_texto"].str.contains(re.escape(p), case=False, na=False)
+                base = base[mask]
+            else:
+                base = base[base["_texto"].str.contains(q, case=False, na=False)]
+
+    total = len(base)
+    st.caption(f"Entradas con texto (filtradas): **{total}**")
+    if total == 0:
+        st.info("No hay comentarios con los filtros actuales.")
+        return
+
+    if fecha_col and fecha_col in base.columns and pd.api.types.is_datetime64_any_dtype(base[fecha_col]):
+        base = base.sort_values(fecha_col, ascending=False)
+
+    # resumen compacto (más estético)
+    with st.expander("Resumen del texto", expanded=True):
+        texts = base["_texto"].astype(str).tolist()
+        lens = [len(t) for t in texts]
+        cA, cB, cC, cD = st.columns(4)
+        cA.metric("Comentarios", f"{len(texts)}")
+        cB.metric("Long. promedio", f"{(sum(lens)/len(lens)):.0f}" if lens else "—")
+        cC.metric("Mediana", f"{pd.Series(lens).median():.0f}" if lens else "—")
+        cD.metric("Máximo", f"{max(lens)}" if lens else "—")
+
+        toks = []
+        for t in texts:
+            toks.extend(_tokenize_es(t, min_len=3))
+        cnt = Counter(toks)
+        top = cnt.most_common(20)
+        if top:
+            top_df = pd.DataFrame(top, columns=["Palabra", "Frecuencia"])
+            st.dataframe(top_df, use_container_width=True, height=280)
+
+    # tabla detalle
+    st.divider()
+    st.markdown("#### Detalle")
+    cols_to_show = []
+    if fecha_col and fecha_col in base.columns:
+        cols_to_show.append(fecha_col)
+    if carrera_col and carrera_col in base.columns:
+        cols_to_show.append(carrera_col)
+    cols_to_show.append("_texto")
+
+    show = base[cols_to_show].rename(columns={"_texto": "Comentario"})
+    st.dataframe(show.head(int(show_n)), use_container_width=True, height=520)
+
+    csv = show.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Descargar CSV (comentarios filtrados)",
+        data=csv,
+        file_name="comentarios_filtrados.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+# ============================================================
+# UI: Por sección (con tarjetas + comentarios por sección)
+# ============================================================
+def _render_por_seccion_con_tarjetas(
+    f: pd.DataFrame,
+    mapa_ok: pd.DataFrame,
+    fecha_col: str | None,
+    carrera_col: str | None,
+):
+    st.markdown("### Secciones (promedio + detalle + comentarios)")
+
+    # construir agregados por sección
+    sec_rows = []
+    for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
+        # num cols para Likert (promedio 1-5) y yes/no
+        g_num = g[g["tipo"].str.upper().isin(["LIKERT", "YESNO", "SI/NO", "SINO"])]
+        cols_num = [c for c in g_num["_col"].tolist() if c and c in f.columns and str(c).endswith("_num")]
+        if not cols_num:
+            continue
+
+        # separar likert/yesno por rango real (en este subset)
+        likert_cols, yesno_cols = _auto_classify_numcols(f, cols_num)
+
+        sec_avg = None
+        if likert_cols:
+            sec_avg = pd.to_numeric(f[likert_cols].stack(), errors="coerce").mean()
+
+        sec_rows.append({
+            "section_code": sec_code,
+            "section_name": sec_name,
+            "avg_likert": float(sec_avg) if pd.notna(sec_avg) else None,
+            "n_q_likert": int(len(likert_cols)),
+            "n_q_yesno": int(len(yesno_cols)),
+        })
+
+    if not sec_rows:
+        st.warning("No pude construir secciones con tu mapa. Revisa que el mapa tenga header_id y que existan columnas *_num en PROCESADO.")
+        return
+
+    # orden: peores arriba (más útil)
+    sec_df = pd.DataFrame(sec_rows)
+    sec_df["_sort"] = sec_df["avg_likert"].fillna(999)
+    sec_df = sec_df.sort_values(["_sort", "section_name"], ascending=[True, True]).drop(columns=["_sort"])
+
+    # vista tipo “tarjeta” (expanders por sección)
+    for _, r in sec_df.iterrows():
+        sec_code = r["section_code"]
+        sec_name = r["section_name"]
+        avg = r["avg_likert"]
+
+        title = f"{sec_name}"
+        if avg is not None:
+            title += f"  •  Promedio: {avg:.2f}"
+        else:
+            title += "  •  Promedio: —"
+
+        with st.expander(title, expanded=False):
+            mm = mapa_ok[mapa_ok["section_code"] == sec_code].copy()
+
+            # ---- Bloque 1: Promedios por pregunta (humanos)
+            st.markdown("#### Preguntas (promedio)")
+            qrows = []
+            for _, m in mm.iterrows():
+                col = m["_col"]
+                if not col or col not in f.columns:
+                    continue
+                tipo = _clean_str(m.get("tipo", "")).upper()
+                if not str(col).endswith("_num"):
+                    continue
+
+                mean_val = _mean_numeric(f[col])
+                if pd.isna(mean_val):
+                    continue
+
+                # clasificar
+                if float(pd.to_numeric(f[col], errors="coerce").max(skipna=True) or 0) <= 1.0:
+                    qrows.append({"Pregunta": m["header_raw"], "Métrica": "% Sí", "Valor": float(mean_val) * 100})
+                else:
+                    qrows.append({"Pregunta": m["header_raw"], "Métrica": "Promedio", "Valor": float(mean_val)})
+
+            if qrows:
+                qdf = pd.DataFrame(qrows)
+
+                # Likert
+                ql = qdf[qdf["Métrica"] == "Promedio"].copy()
+                if not ql.empty:
+                    ql = ql.sort_values("Valor", ascending=True).reset_index(drop=True)
+                    st.dataframe(ql.rename(columns={"Valor": "Promedio"}), use_container_width=True, height=280)
+
+                # Yes/No
+                qy = qdf[qdf["Métrica"] == "% Sí"].copy()
+                if not qy.empty:
+                    qy = qy.sort_values("Valor", ascending=True).reset_index(drop=True)
+                    st.dataframe(qy.rename(columns={"Valor": "% Sí"}), use_container_width=True, height=220)
+
+            else:
+                st.info("Sin datos numéricos para esta sección con los filtros actuales.")
+
+            st.divider()
+
+            # ---- Bloque 2: Comentarios de esta sección (todas sus ABIERTAS)
+            st.markdown("#### Comentarios de la sección")
+
+            open_mm = mm[mm["tipo"].str.upper().isin(["ABIERTA", "ABIERTO", "OPEN", "TEXTO", "TEXT"])].copy()
+            open_mm = open_mm[open_mm["exists"]].copy()
+
+            if open_mm.empty:
+                st.info("Esta sección no tiene preguntas abiertas en el mapa.")
+                continue
+
+            open_options = []
+            for _, m in open_mm.iterrows():
+                open_options.append((m["header_raw"], m["_col"], m.get("keywords", "")))
+
+            c1, c2, c3 = st.columns([2.4, 1.2, 1.4])
+            with c1:
+                sel_label = st.selectbox("Pregunta abierta (sección)", [o[0] for o in open_options], key=f"open_{sec_code}")
+            with c2:
+                min_chars = st.number_input("Mín. caracteres", min_value=0, max_value=500, value=10, step=5, key=f"min_{sec_code}")
+            with c3:
+                use_kw = st.checkbox("Usar diccionario (keywords)", value=True, key=f"kw_{sec_code}")
+
+            sel_col = dict((o[0], o[1]) for o in open_options)[sel_label]
+            sel_kw = dict((o[0], o[2]) for o in open_options).get(sel_label, "")
+
+            c4, c5, c6 = st.columns([2.2, 1.2, 1.6])
+            with c4:
+                query = st.text_input("Buscar (palabra/frase)", value="", key=f"q_{sec_code}")
+            with c5:
+                mode = st.selectbox("Modo", ["Contiene", "Regex"], index=0, key=f"mode_{sec_code}")
+            with c6:
+                show_n = st.number_input("Mostrar N", min_value=10, max_value=2000, value=150, step=50, key=f"n_{sec_code}")
+
+            s = f[sel_col].dropna().astype(str)
+            s = s[s.str.strip() != ""]
+            base = f.loc[s.index].copy()
+            base["_texto"] = s
+
+            if min_chars and min_chars > 0:
+                base = base[base["_texto"].astype(str).str.len() >= int(min_chars)]
+
+            if use_kw and _clean_str(sel_kw):
+                kws = _parse_keywords_pipe(sel_kw)
+                if kws:
+                    rx = re.compile(r"(" + "|".join([re.escape(k) for k in kws]) + r")", flags=re.IGNORECASE)
+                    base = base[base["_texto"].astype(str).apply(lambda x: bool(rx.search(x)))]
+
+            q = (query or "").strip()
+            if q:
+                if mode == "Regex":
+                    try:
+                        rx = re.compile(q, flags=re.IGNORECASE)
+                        base = base[base["_texto"].astype(str).apply(lambda x: bool(rx.search(x)))]
+                    except re.error:
+                        st.warning("Regex inválida. Cambia a modo 'Contiene' o corrige tu patrón.")
+                else:
+                    base = base[base["_texto"].str.contains(q, case=False, na=False)]
+
+            st.caption(f"Comentarios filtrados: **{len(base)}**")
+            if base.empty:
+                st.info("No hay comentarios con los filtros actuales.")
+                continue
+
+            # mostrar tabla bonita
+            cols_show = []
+            if fecha_col and fecha_col in base.columns:
+                cols_show.append(fecha_col)
+            if carrera_col and carrera_col in base.columns:
+                cols_show.append(carrera_col)
+            cols_show.append("_texto")
+
+            show = base[cols_show].rename(columns={"_texto": "Comentario"})
+            st.dataframe(show.head(int(show_n)), use_container_width=True, height=420)
+
+
 # ============================================================
 # Render principal
 # ============================================================
@@ -496,7 +699,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     vista = str(vista).strip()
 
     # ---------------------------
-    # Selección de modalidad
+    # Modalidad
     # ---------------------------
     if vista in ["Dirección General", "Dirección Finanzas"]:
         modalidad = st.selectbox(
@@ -511,10 +714,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         st.caption(f"Modalidad asignada automáticamente: **{modalidad}**")
 
     url = _get_url_for_modalidad(modalidad)
-
-    # ---------------------------
-    # Elegir pestaña a leer
-    # ---------------------------
     sheet_pro = SHEET_PROCESADO_DF if vista == "Dirección Finanzas" else SHEET_PROCESADO_DEFAULT
 
     # ---------------------------
@@ -535,62 +734,25 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
     if modalidad == "Preparatoria" and sheet_pro == SHEET_PROCESADO_DEFAULT:
         df = _ensure_prepa_columns(df)
 
-    # Fecha
+    # fecha
     fecha_col = _pick_fecha_col(df)
     if fecha_col:
         df[fecha_col] = _to_datetime_safe(df[fecha_col])
 
     # ---------------------------
-    # Normalizar MAPA (soporta mapa viejo y mapa nuevo)
+    # Preparar mapa (NUEVO)
     # ---------------------------
-    mapa = mapa.copy()
+    try:
+        mapa2 = _prepare_mapa_nuevo(mapa, df)
+    except Exception as e:
+        st.error(str(e))
+        st.stop()
 
-    # columnas mínimas aceptadas: header_exacto + scale_code, y alguna de (header_num o header_id)
-    if "header_exacto" not in mapa.columns and "header_raw" in mapa.columns:
-        mapa["header_exacto"] = mapa["header_raw"]
-
-    required_any = {"header_exacto", "scale_code"}
-    if not required_any.issubset(set(mapa.columns)):
-        st.error("La hoja 'Mapa_Preguntas' debe traer al menos: header_exacto (o header_raw) y scale_code.")
+    mapa_ok = mapa2[mapa2["exists"]].copy()
+    if mapa_ok.empty:
+        st.warning("Tu Mapa_Preguntas no logró mapear columnas reales del PROCESADO. Revisa header_id vs nombres de columnas.")
+        st.dataframe(mapa2.head(50), use_container_width=True)
         return
-    if ("header_num" not in mapa.columns) and ("header_id" not in mapa.columns):
-        st.error("La hoja 'Mapa_Preguntas' debe traer: header_num o header_id (idealmente ambas).")
-        return
-
-    # limpiar strings
-    for c in ["modalidad", "header_raw", "header_exacto", "header_id", "scale_code", "header_num", "section_code", "section_name", "driver_name", "keywords"]:
-        if c in mapa.columns:
-            mapa[c] = mapa[c].astype(str).fillna("").map(lambda x: str(x).strip())
-
-    # scale normalizado
-    mapa["scale_code_norm"] = mapa["scale_code"].apply(_normalize_scale_code)
-
-    # section_code: si existe úsalo; si no, intenta derivar de header_num, luego de header_id
-    if "section_code" not in mapa.columns or (mapa["section_code"].astype(str).str.strip() == "").all():
-        def _sec_from_any(row):
-            hn = _safe_str(row.get("header_num"))
-            if hn and "_" in hn:
-                return hn.split("_", 1)[0]
-            hid = _safe_str(row.get("header_id"))
-            if hid:
-                parts = hid.split("_")
-                if len(parts) >= 2:
-                    return parts[1]
-            return "OTR"
-        mapa["section_code"] = mapa.apply(_sec_from_any, axis=1)
-
-    # section_name fallback
-    if "section_name" not in mapa.columns or (mapa["section_name"].astype(str).str.strip() == "").all():
-        mapa["section_name"] = mapa["section_code"].map(SECTION_LABELS).fillna(mapa["section_code"])
-    else:
-        # si viene abreviado o vacío, usa fallback
-        mapa["section_name"] = mapa["section_name"].astype(str).str.strip()
-        mask_abbrev = (mapa["section_name"] == "") | (mapa["section_name"].str.len() <= 4)
-        mapa.loc[mask_abbrev, "section_name"] = mapa.loc[mask_abbrev, "section_code"].map(SECTION_LABELS).fillna(mapa.loc[mask_abbrev, "section_code"])
-
-    # resolver columna real
-    df_cols = set(df.columns)
-    mapa["col_resuelta"] = mapa.apply(lambda r: _infer_col_from_map_row(r, df_cols), axis=1)
 
     # ---------------------------
     # Filtros: Año + Carrera/Servicio
@@ -620,7 +782,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     opts = ["(Todas)"] + sorted(df[carrera_col].dropna().astype(str).str.strip().unique().tolist())
                     carrera_sel = st.selectbox("Carrera/Servicio", opts, index=0)
                 else:
-                    st.info("No encontré columna válida para Carrera/Servicio.")
+                    st.info("No encontré columna válida para filtrar por Carrera/Servicio.")
                     carrera_col = None
                     carrera_sel = "(Todas)"
     else:
@@ -677,19 +839,11 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         return
 
     # =========================================================
-    # CAMINO DG/DC (PROCESADO): usa *_num y *_txt, pero YA CON MAPA NUEVO
+    # DG/DC (PROCESADO)
     # =========================================================
     if vista != "Dirección Finanzas":
-        # mapa_ok: solo filas con col_resuelta existente
-        mapa_ok = mapa[mapa["col_resuelta"].astype(str).str.strip() != ""].copy()
-
-        # num cols detectadas
-        num_cols = [c for c in f.columns if str(c).endswith("_num")]
-        if not num_cols:
-            st.warning("No encontré columnas *_num en PROCESADO. Verifica que tu PROCESADO tenga numéricos.")
-            st.dataframe(f.head(30), use_container_width=True)
-            return
-
+        # num cols reales del mapa
+        num_cols = [c for c in mapa_ok["_col"].tolist() if c and c in f.columns and str(c).endswith("_num")]
         likert_cols, yesno_cols = _auto_classify_numcols(f, num_cols)
 
         # Tabs
@@ -723,23 +877,22 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
 
             rows = []
             for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
-                cols = []
-                for _, m in g.iterrows():
-                    col = m["col_resuelta"]
-                    if col in f.columns and col in likert_cols:
-                        cols.append(col)
+                cols = [c for c in g["_col"].tolist() if c in f.columns and str(c).endswith("_num")]
                 if not cols:
                     continue
-                val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
+                sec_likert, _sec_yesno = _auto_classify_numcols(f, cols)
+                if not sec_likert:
+                    continue
+                val = pd.to_numeric(f[sec_likert].stack(), errors="coerce").mean()
                 if pd.isna(val):
                     continue
-                rows.append({"Sección": sec_name, "Promedio": float(val), "Preguntas": len(cols), "sec_code": sec_code})
+                rows.append({"Sección": sec_name, "Promedio": float(val), "Preguntas": len(sec_likert)})
 
             if not rows:
                 st.info("No hay datos suficientes para calcular promedios por sección (Likert) con los filtros actuales.")
             else:
-                sec_df = pd.DataFrame(rows).sort_values("Promedio", ascending=False)
-                st.dataframe(sec_df.drop(columns=["sec_code"], errors="ignore"), use_container_width=True)
+                sec_df = pd.DataFrame(rows).sort_values("Promedio", ascending=True)
+                st.dataframe(sec_df, use_container_width=True)
 
                 sec_chart = _bar_chart_auto(
                     df_in=sec_df,
@@ -757,165 +910,42 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                 if sec_chart is not None:
                     st.altair_chart(sec_chart, use_container_width=True)
 
-            if yesno_cols:
-                st.divider()
-                st.markdown("### Sí/No (por pregunta) — % Sí")
-
-                yn_rows = []
-                # Solo preguntas YESNO del mapa (si las hay); si no, muestra las yesno_cols detectadas
-                mapa_yesno = mapa_ok[mapa_ok["scale_code_norm"] == "YESNO"].copy()
-                if not mapa_yesno.empty:
-                    it = mapa_yesno.iterrows()
-                    for _, m in it:
-                        col = m["col_resuelta"]
-                        if col not in f.columns or col not in yesno_cols:
-                            continue
-                        mean_val = _mean_numeric(f[col])
-                        if pd.isna(mean_val):
-                            continue
-                        yn_rows.append({"Pregunta": m["header_exacto"], "% Sí": float(mean_val) * 100})
-                else:
-                    for col in yesno_cols:
-                        mean_val = _mean_numeric(f[col])
-                        if pd.isna(mean_val):
-                            continue
-                        yn_rows.append({"Pregunta": col, "% Sí": float(mean_val) * 100})
-
-                yn_df = pd.DataFrame(yn_rows).sort_values("% Sí", ascending=False) if yn_rows else pd.DataFrame()
-                if not yn_df.empty:
-                    st.dataframe(yn_df, use_container_width=True)
-                    yn_chart = _bar_chart_auto(
-                        df_in=yn_df,
-                        category_col="Pregunta",
-                        value_col="% Sí",
-                        value_domain=[0, 100],
-                        value_title="% Sí",
-                        tooltip_cols=[alt.Tooltip("% Sí:Q", format=".1f"), alt.Tooltip("Pregunta:N")],
-                        max_vertical=MAX_VERTICAL_QUESTIONS,
-                        wrap_width_vertical=24,
-                        wrap_width_horizontal=40,
-                        base_height=340,
-                        hide_category_labels=True,
-                    )
-                    if yn_chart is not None:
-                        st.altair_chart(yn_chart, use_container_width=True)
-
         # ---------------------------
-        # Por sección (MEJORADO: incluye ABIERTAS por sección)
+        # Por sección (TARJETAS + comentarios por sección)
         # ---------------------------
         with tab2:
-            st.markdown("### Por sección (promedio + preguntas + respuestas abiertas)")
-
-            # Tabla resumen secciones (Likert)
-            sec_rows = []
-            for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
-                cols = [m["col_resuelta"] for _, m in g.iterrows() if m["col_resuelta"] in f.columns and m["col_resuelta"] in likert_cols]
-                if not cols:
-                    continue
-                val = pd.to_numeric(f[cols].stack(), errors="coerce").mean()
-                if pd.isna(val):
-                    continue
-                sec_rows.append({"Sección": sec_name, "Promedio": float(val), "Preguntas": len(cols), "sec_code": sec_code})
-
-            sec_df2 = pd.DataFrame(sec_rows).sort_values("Promedio", ascending=False) if sec_rows else pd.DataFrame()
-            if sec_df2.empty:
-                st.info("No hay secciones Likert disponibles con los filtros actuales.")
-            else:
-                for _, r in sec_df2.iterrows():
-                    sec_code = r["sec_code"]
-                    sec_name = r["Sección"]
-                    sec_avg = r["Promedio"]
-
-                    with st.expander(f"{sec_name} — Promedio: {sec_avg:.2f}", expanded=False):
-                        mm = mapa_ok[mapa_ok["section_code"] == sec_code].copy()
-
-                        # 1) Preguntas numéricas
-                        qrows = []
-                        for _, m in mm.iterrows():
-                            col = m["col_resuelta"]
-                            if not col or col not in f.columns:
-                                continue
-
-                            if col in yesno_cols:
-                                mean_val = _mean_numeric(f[col])
-                                if pd.isna(mean_val):
-                                    continue
-                                qrows.append({"Pregunta": m["header_exacto"], "Valor": float(mean_val) * 100, "Tipo": "Sí/No"})
-                            elif col in likert_cols:
-                                mean_val = _mean_numeric(f[col])
-                                if pd.isna(mean_val):
-                                    continue
-                                qrows.append({"Pregunta": m["header_exacto"], "Valor": float(mean_val), "Tipo": "Likert"})
-
-                        qdf = pd.DataFrame(qrows)
-
-                        if not qdf.empty:
-                            qdf_l = qdf[qdf["Tipo"] == "Likert"].copy()
-                            if not qdf_l.empty:
-                                qdf_l = qdf_l.sort_values("Valor", ascending=False)
-                                st.markdown("**Preguntas Likert (1–5)**")
-                                show_l = qdf_l.rename(columns={"Valor": "Promedio"})[["Pregunta", "Promedio"]].reset_index(drop=True)
-                                st.dataframe(show_l, use_container_width=True)
-
-                            qdf_y = qdf[qdf["Tipo"] == "Sí/No"].copy()
-                            if not qdf_y.empty:
-                                qdf_y = qdf_y.sort_values("Valor", ascending=False)
-                                st.markdown("**Preguntas Sí/No**")
-                                show_y = qdf_y.rename(columns={"Valor": "% Sí"})[["Pregunta", "% Sí"]].reset_index(drop=True)
-                                st.dataframe(show_y, use_container_width=True)
-                        else:
-                            st.info("Sin preguntas numéricas para esta sección con los filtros actuales.")
-
-                        # 2) ABIERTAS por sección (lo que pediste)
-                        open_items = []
-                        mm_open = mm[mm["scale_code_norm"] == "ABIERTA"].copy()
-                        for _, m in mm_open.iterrows():
-                            col = m["col_resuelta"]
-                            if col and col in f.columns:
-                                open_items.append({
-                                    "col": col,
-                                    "label": m.get("header_exacto", col),
-                                    "section": sec_name,
-                                    "driver": m.get("driver_name", ""),
-                                })
-
-                        if open_items:
-                            st.divider()
-                            st.markdown("**Respuestas abiertas de esta sección**")
-                            carrera_col3 = _best_carrera_col(f)
-                            _render_comentarios(
-                                df_in=f,
-                                open_items=open_items,
-                                fecha_col=fecha_col,
-                                carrera_col=carrera_col3,
-                                title="",
-                            )
-                        else:
-                            st.caption("Sin preguntas abiertas registradas en el mapa para esta sección.")
+            carrera_col3 = _best_carrera_col(f)
+            _render_por_seccion_con_tarjetas(
+                f=f,
+                mapa_ok=mapa_ok,
+                fecha_col=fecha_col,
+                carrera_col=carrera_col3,
+            )
 
         # ---------------------------
         # Comparativo entre carreras (solo DG)
         # ---------------------------
         if tab4 is not None:
             with tab4:
-                st.markdown("### Comparativo entre carreras por sección")
-                st.caption("Promedios Likert (1–5) por sección (respeta filtro de Año).")
-
+                st.markdown("### Comparativo entre carreras por sección (Likert)")
                 carrera_col2 = _best_carrera_col(f)
                 if not carrera_col2:
-                    st.warning("No se encontró una columna válida para identificar Carrera/Servicio.")
+                    st.warning("No se encontró una columna válida para Carrera/Servicio en PROCESADO.")
                 else:
                     if carrera_param_fija:
-                        st.info("Para ver el comparativo entre carreras, selecciona **(Todas)**.")
+                        st.info("Para comparar entre carreras, selecciona '(Todas)' en Carrera/Servicio.")
                     else:
                         for (sec_code, sec_name), g in mapa_ok.groupby(["section_code", "section_name"]):
-                            cols = [m["col_resuelta"] for _, m in g.iterrows() if m["col_resuelta"] in f.columns and m["col_resuelta"] in likert_cols]
+                            cols = [c for c in g["_col"].tolist() if c in f.columns and str(c).endswith("_num")]
                             if not cols:
+                                continue
+                            sec_likert, _sec_yesno = _auto_classify_numcols(f, cols)
+                            if not sec_likert:
                                 continue
 
                             rows = []
                             for carrera_val, df_c in f.groupby(carrera_col2):
-                                vals = pd.to_numeric(df_c[cols].stack(), errors="coerce")
+                                vals = pd.to_numeric(df_c[sec_likert].stack(), errors="coerce")
                                 mean_val = vals.mean()
                                 if pd.isna(mean_val):
                                     continue
@@ -923,59 +953,59 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                                     "Carrera/Servicio": str(carrera_val).strip(),
                                     "Promedio": round(float(mean_val), 2),
                                     "Respuestas": int(len(df_c)),
-                                    "Preguntas": int(len(cols)),
                                 })
 
                             if not rows:
                                 continue
 
-                            sec_comp = pd.DataFrame(rows).sort_values("Promedio", ascending=False).reset_index(drop=True)
+                            sec_comp = pd.DataFrame(rows).sort_values("Promedio", ascending=True).reset_index(drop=True)
+
                             with st.expander(f"{sec_name}", expanded=False):
                                 st.dataframe(sec_comp, use_container_width=True)
 
+                                chart = _bar_chart_auto(
+                                    df_in=sec_comp,
+                                    category_col="Carrera/Servicio",
+                                    value_col="Promedio",
+                                    value_domain=[1, 5],
+                                    value_title="Promedio",
+                                    tooltip_cols=[
+                                        alt.Tooltip("Carrera/Servicio:N", title="Carrera/Servicio"),
+                                        alt.Tooltip("Promedio:Q", format=".2f"),
+                                        "Respuestas",
+                                    ],
+                                    max_vertical=MAX_VERTICAL_SECTIONS,
+                                    wrap_width_vertical=20,
+                                    wrap_width_horizontal=36,
+                                    base_height=320,
+                                    hide_category_labels=True,
+                                )
+                                if chart is not None:
+                                    st.altair_chart(chart, use_container_width=True)
+
         # ---------------------------
-        # Comentarios (DG/DC) — ESTÉTICOS + sin IDs
+        # Comentarios (global, BONITO)
         # ---------------------------
         with tab3:
-            # ABIERTAS desde mapa
-            open_items = []
-            m_open = mapa_ok[mapa_ok["scale_code_norm"] == "ABIERTA"].copy()
-
-            for _, m in m_open.iterrows():
-                col = _safe_str(m.get("col_resuelta"))
-                if not col or col not in f.columns:
-                    continue
-
-                label = _safe_str(m.get("header_exacto")) or col
-                section = _safe_str(m.get("section_name"))
-                driver = _safe_str(m.get("driver_name"))
-
-                open_items.append({"col": col, "label": label, "section": section, "driver": driver})
-
-            # fallback por si acaso
-            if not open_items:
-                fallback_cols = [
-                    c for c in f.columns
-                    if (not str(c).endswith("_num"))
-                    and any(k in str(c).lower() for k in ["¿por qué", "por qué", "comentario", "sugerencia", "escríbelo", "escribelo", "descr"])
-                ]
-                open_items = [{"col": c, "label": c, "section": "", "driver": ""} for c in fallback_cols]
-
             carrera_col3 = _best_carrera_col(f)
-            _render_comentarios(
-                df_in=f,
-                open_items=open_items,
+            _render_comentarios_bonitos(
+                f=f,
+                mapa_ok=mapa_ok,
                 fecha_col=fecha_col,
                 carrera_col=carrera_col3,
-                title="Comentarios y respuestas abiertas",
+                title="Comentarios (por pregunta abierta, con texto humano)",
             )
 
         return
 
     # =========================================================
-    # CAMINO DF (Dirección Finanzas): sin *_num; columnas “humanas” ya numéricas
+    # DF (VISTA_FINANZAS_NUM)
     # =========================================================
-    open_cols_df = [c for c in f.columns if any(k in str(c).lower() for k in ["¿por qué", "por qué", "comentario", "sugerencia", "escríbelo", "escribelo"])]
+    open_cols_df = []
+    # si DF no trae mapa con header_id útil, igual intentamos extraer abiertos por heurística
+    for c in f.columns:
+        if any(k in str(c).lower() for k in ["¿por qué", "por qué", "comentario", "sugerencia", "escríbelo", "escribelo", "descr"]):
+            open_cols_df.append(c)
 
     base_exclude = set()
     for c in ["Marca temporal", "Marca Temporal", "Dirección de correo electrónico"]:
@@ -984,14 +1014,16 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
 
     num_candidates = []
     for c in f.columns:
-        if c in base_exclude or c in open_cols_df:
+        if c in base_exclude:
+            continue
+        if c in open_cols_df:
             continue
         s = pd.to_numeric(f[c], errors="coerce")
         if s.notna().any():
             num_candidates.append(c)
 
     if not num_candidates:
-        st.warning("No encontré columnas numéricas en VISTA_FINANZAS_NUM (revisa que el script haya convertido).")
+        st.warning("No encontré columnas numéricas en VISTA_FINANZAS_NUM.")
         st.dataframe(f.head(30), use_container_width=True)
         return
 
@@ -1018,7 +1050,6 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
         st.divider()
 
         if likert_cols:
-            st.markdown("### Likert (1–5) — Promedio por pregunta")
             rows = []
             for col in likert_cols:
                 mean_val = _mean_numeric(f[col])
@@ -1026,15 +1057,27 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     continue
                 rows.append({"Pregunta": col, "Promedio": float(mean_val)})
 
-            d = pd.DataFrame(rows).sort_values("Promedio", ascending=False) if rows else pd.DataFrame()
+            d = pd.DataFrame(rows).sort_values("Promedio", ascending=True) if rows else pd.DataFrame()
             if not d.empty:
                 st.dataframe(d, use_container_width=True)
-        else:
-            st.info("Sin datos Likert suficientes con los filtros actuales.")
+                ch = _bar_chart_auto(
+                    df_in=d,
+                    category_col="Pregunta",
+                    value_col="Promedio",
+                    value_domain=[1, 5],
+                    value_title="Promedio",
+                    tooltip_cols=[alt.Tooltip("Promedio:Q", format=".2f"), alt.Tooltip("Pregunta:N")],
+                    max_vertical=MAX_VERTICAL_QUESTIONS,
+                    wrap_width_vertical=24,
+                    wrap_width_horizontal=40,
+                    base_height=340,
+                    hide_category_labels=True,
+                )
+                if ch is not None:
+                    st.altair_chart(ch, use_container_width=True)
 
         if yesno_cols:
             st.divider()
-            st.markdown("### Sí/No — % Sí por pregunta")
             rows = []
             for col in yesno_cols:
                 mean_val = _mean_numeric(f[col])
@@ -1042,7 +1085,7 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
                     continue
                 rows.append({"Pregunta": col, "% Sí": float(mean_val) * 100})
 
-            d = pd.DataFrame(rows).sort_values("% Sí", ascending=False) if rows else pd.DataFrame()
+            d = pd.DataFrame(rows).sort_values("% Sí", ascending=True) if rows else pd.DataFrame()
             if not d.empty:
                 st.dataframe(d, use_container_width=True)
 
@@ -1080,12 +1123,14 @@ def render_encuesta_calidad(vista: str | None = None, carrera: str | None = None
             st.altair_chart(ch, use_container_width=True)
 
     with tab3:
-        open_items = [{"col": c, "label": c, "section": "", "driver": ""} for c in open_cols_df]
-        carrera_col_df = _best_carrera_col(f)
-        _render_comentarios(
-            df_in=f,
-            open_items=open_items,
-            fecha_col=fecha_col,
-            carrera_col=carrera_col_df,
-            title="Comentarios y respuestas abiertas",
-        )
+        # DF sin mapa bonito, dejamos simple (o lo ajustamos luego)
+        if not open_cols_df:
+            st.info("No se detectaron columnas de comentarios con la heurística actual.")
+            return
+        col_sel = st.selectbox("Campo abierto", open_cols_df)
+        s = f[col_sel].dropna().astype(str)
+        s = s[s.str.strip() != ""]
+        base = f.loc[s.index].copy()
+        base["_texto"] = s
+        st.caption(f"Entradas con texto: **{len(base)}**")
+        st.dataframe(base[["_texto"]].rename(columns={"_texto": "Comentario"}).head(300), use_container_width=True, height=520)
